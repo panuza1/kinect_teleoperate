@@ -26,4 +26,5 @@ list(INSERT CMAKE_MODULE_PATH 0 ${CMAKE_CURRENT_LIST_DIR}/cmake)
 
 add_subdirectory(extern)
 add_subdirectory(kinect_teleoperate_robot)
+add_subdirectory(kinect_smpl_zmq_bridge)
 add_subdirectory(sample_helper_libs)

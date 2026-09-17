@@ -33,8 +33,8 @@ using namespace std::chrono;
 
 bool s_isRunning = true;
 
-#define Control_G1 false
-#define Control_H1 true
+#define Control_G1 true
+#define Control_H1 false
 #define Real_Control false    // control real unitree robot in reality
 #define Enable_Torso false    // enable torso rotation angle mapping. Test function, open with caution!
 #define Enable_Hand  false    // enable hand opening and closing status detection. Test function, open with caution!
@@ -706,6 +706,10 @@ int main(int argc, char** argv)
 
     char error[1000];
     m = mj_loadXML(model_path, nullptr, error, 1000);
+    if (m == nullptr) {
+        std::cerr << "Failed to load MuJoCo model '" << model_path << "': " << error << std::endl;
+        return 1;
+    }
     d = mj_makeData(m);
     mj_resetData(m, d);
 

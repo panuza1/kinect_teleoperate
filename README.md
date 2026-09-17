@@ -6,7 +6,7 @@
 
 # Introduction
 
-This repository implements teleoperation of the humanoid robot Unitree H1 using Azure Kinect DK camera.
+This repository implements teleoperation of the humanoid robot Unitree G1 using Azure Kinect DK camera.
 
 # Prerequisites
 
@@ -135,7 +135,7 @@ This repository uses the [Mujoco](https://mujoco.org/) physics engine for simula
 
 For convenience, the Mujoco repository files have already been placed in the `src/mujoco-3.1.5` directory of this example, so developers do not need to download them manually.
 
-The Unitree H1 `XML` model file needed for the Mujoco simulation environment has been placed in the `src/unitree_h1` directory of this repository.
+The Unitree G1 `XML` model file needed for the MuJoCo simulation environment has been placed in the `src/unitree_g1` directory of this repository.
 
 If developers want to visualize the model file using Mujoco for research purposes, they can proceed with the following command :
 
@@ -146,7 +146,7 @@ pip install mujoco
 python -m mujoco.viewer 
 ```
 
-After dragging the MJCF model file (`src/unitree_h1/mjcf/scene.xml`) into the MuJoCo viewer window with your mouse, the result is shown in the image below :
+After dragging the MJCF model file (`src/unitree_g1/scene.xml`) into the MuJoCo viewer window with your mouse, the result is shown in the image below :
 
 <center>
 <img src="https://doc-cdn.unitree.com/static/2024/7/25/b3b26e125996448ea8e850e8516689de_1726x1015.png" width=720>
