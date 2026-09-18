@@ -37,4 +37,9 @@ if ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_C_COMPILER_ID}" STREQUAL
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--as-needed,-rpath-link=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 endif()
 
-add_subdirectory(src)
+option(KINECT_BRIDGE_ONLY "Build only the Kinect to SONIC bridge" OFF)
+if (KINECT_BRIDGE_ONLY)
+    add_subdirectory(src/kinect_smpl_zmq_bridge)
+else()
+    add_subdirectory(src)
+endif()

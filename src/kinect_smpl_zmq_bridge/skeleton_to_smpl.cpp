@@ -87,6 +87,7 @@ float wrap_angle(float angle) {
 
 struct SkeletonToSmpl::Impl {
     Quat root_calibration = Quat::Identity();
+    Vec3 neutral_pelvis = Vec3::Zero();
     std::array<Quat, 24> pose_calibration{};
     std::array<Quat, 24> last_orientation{};
     std::array<Vec3, 24> last_joint_position{};
@@ -100,10 +101,50 @@ struct SkeletonToSmpl::Impl {
     }
 };
 
-SkeletonToSmpl::SkeletonToSmpl(float smoothing)
-    : smoothing_(std::clamp(smoothing, 0.0f, 0.95f)), impl_(new Impl()) {}
+SkeletonToSmpl::SkeletonToSmpl(float smoothing, bool auto_calibrate)
+    : smoothing_(std::clamp(smoothing, 0.0f, 0.95f)), auto_calibrate_(auto_calibrate), impl_(new Impl()) {}
 
 SkeletonToSmpl::~SkeletonToSmpl() { delete impl_; }
+
+bool SkeletonToSmpl::calibrate(const std::vector<k4abt_skeleton_t>& neutral_frames) {
+    if (neutral_frames.empty()) return false;
+    std::array<Vec3, 24> average_position{};
+    std::array<Eigen::Vector4f, 24> average_quaternion{};
+    std::array<int, 24> counts{};
+    average_position.fill(Vec3::Zero());
+    average_quaternion.fill(Eigen::Vector4f::Zero());
+    for (const auto& skeleton : neutral_frames) {
+        for (int i = 0; i < 24; ++i) {
+            const auto& joint = skeleton.joints[kKinectForSmpl[i]];
+            if (!valid_joint(joint)) continue;
+            average_position[i] += position_m(joint);
+            const Quat q = orientation_sonic(joint);
+            Eigen::Vector4f coeffs = q.coeffs();
+            if (counts[i] && average_quaternion[i].dot(coeffs) < 0.0f) coeffs *= -1.0f;
+            average_quaternion[i] += coeffs;
+            ++counts[i];
+        }
+    }
+    std::array<Quat, 24> absolute_orientation{};
+    for (int i = 0; i < 24; ++i) {
+        if (counts[i] < static_cast<int>(neutral_frames.size() * 3 / 4) ||
+            average_quaternion[i].norm() < 1e-6f) return false;
+        average_position[i] /= static_cast<float>(counts[i]);
+        absolute_orientation[i] = Quat(average_quaternion[i].normalized()).normalized();
+    }
+    const float feet_z = std::min(average_position[10].z(), average_position[11].z());
+    const float height = average_position[15].z() - feet_z;
+    if (!std::isfinite(height) || height <= 0.5f) return false;
+    body_scale_ = std::clamp(1.70f / height, 0.8f, 1.2f);
+    impl_->root_calibration = absolute_orientation[0];
+    impl_->neutral_pelvis = average_position[0];
+    for (int i = 1; i < 24; ++i) {
+        impl_->pose_calibration[i] = absolute_orientation[kSmplParents[i]].conjugate() *
+                                      absolute_orientation[i];
+    }
+    calibrated_ = true;
+    return true;
+}
 
 bool SkeletonToSmpl::convert(const k4abt_skeleton_t& skeleton, std::uint64_t frame_index,
                              float dt_s, SonicPoseFrame& output) {
@@ -140,15 +181,8 @@ bool SkeletonToSmpl::convert(const k4abt_skeleton_t& skeleton, std::uint64_t fra
     const Vec3 root = joints[0];
     const float feet_z = std::min(joints[10].z(), joints[11].z());
     const float height = joints[15].z() - feet_z;
-    if (!calibrated_ && valid[10] && valid[11] && valid[15] && height > 0.5f) {
-        body_scale_ = std::clamp(1.70f / height, 0.8f, 1.2f);
-        impl_->root_calibration = orientations[0];
-        for (int i = 1; i < 24; ++i) {
-            const int parent = kSmplParents[i];
-            impl_->pose_calibration[i] = orientations[parent].conjugate() * orientations[i];
-        }
-        calibrated_ = true;
-    }
+    if (!calibrated_ && auto_calibrate_ && valid[10] && valid[11] && valid[15] && height > 0.5f)
+        calibrate({skeleton});
     if (!calibrated_) {
         return false;
     }
@@ -212,7 +246,11 @@ bool SkeletonToSmpl::convert(const k4abt_skeleton_t& skeleton, std::uint64_t fra
     output.smpl_joints = last_joints_;
     output.smpl_pose = last_pose_;
     output.body_quat_w = last_root_;
-    output.pelvis_position_m = last_pelvis_;
+    output.pelvis_position_m = {
+        last_pelvis_[0] - impl_->neutral_pelvis.x(),
+        last_pelvis_[1] - impl_->neutral_pelvis.y(),
+        last_pelvis_[2] - impl_->neutral_pelvis.z()
+    };
     output.velocity_mps = filtered_velocity_;
     output.yaw_rate_rps = filtered_yaw_rate_;
     frame_index_ = frame_index;
