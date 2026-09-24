@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "provenance": "synthetic_reconstruction_original_operator_artifact_not_found",
+  "joint_order": "G1_MOTOR_NAMES",
+  "limits_source": "gear_sonic/data/robot_model/model_data/g1/g1_29dof_with_hand.xml",
+  "cases": [
+    {
+      "name": "reported_failure_reconstruction",
+      "expected": "REJECT",
+      "frames": [
+        {"t": 0.0, "targets": {}},
+        {"t": 0.1, "targets": {"left_hip_pitch_joint": -0.2, "left_knee_joint": 0.3, "left_ankle_pitch_joint": -0.1}},
+        {"t": 0.2, "targets": {"left_hip_pitch_joint": -0.4, "left_knee_joint": 0.7, "left_ankle_pitch_joint": -0.25}},
+        {"t": 0.3, "targets": {"left_hip_pitch_joint": -0.55, "left_knee_joint": 1.0, "left_ankle_pitch_joint": -0.35, "left_ankle_roll_joint": 0.4}}
+      ]
+    },
+    {
+      "name": "left_leg_raise_corrected",
+      "expected": "ACCEPT",
+      "frames": [
+        {"t": 0.0, "targets": {}},
+        {"t": 0.1, "targets": {"left_hip_pitch_joint": -0.2, "left_knee_joint": 0.3, "left_ankle_pitch_joint": -0.1, "left_ankle_roll_joint": 0.04}},
+        {"t": 0.2, "targets": {"left_hip_pitch_joint": -0.4, "left_knee_joint": 0.7, "left_ankle_pitch_joint": -0.25, "left_ankle_roll_joint": 0.08}},
+        {"t": 0.3, "targets": {"left_hip_pitch_joint": -0.55, "left_knee_joint": 1.0, "left_ankle_pitch_joint": -0.35, "left_ankle_roll_joint": 0.12}},
+        {"t": 0.5, "targets": {"left_hip_pitch_joint": -0.55, "left_knee_joint": 1.0, "left_ankle_pitch_joint": -0.35, "left_ankle_roll_joint": 0.12}},
+        {"t": 0.7, "targets": {"left_hip_pitch_joint": -0.3, "left_knee_joint": 0.5, "left_ankle_pitch_joint": -0.18, "left_ankle_roll_joint": 0.06}},
+        {"t": 0.9, "targets": {}}
+      ]
+    },
+    {
+      "name": "right_leg_raise_mirror",
+      "expected": "ACCEPT",
+      "frames": [
+        {"t": 0.0, "targets": {}},
+        {"t": 0.1, "targets": {"right_hip_pitch_joint": -0.2, "right_knee_joint": 0.3, "right_ankle_pitch_joint": -0.1, "right_ankle_roll_joint": -0.04}},
+        {"t": 0.2, "targets": {"right_hip_pitch_joint": -0.4, "right_knee_joint": 0.7, "right_ankle_pitch_joint": -0.25, "right_ankle_roll_joint": -0.08}},
+        {"t": 0.3, "targets": {"right_hip_pitch_joint": -0.55, "right_knee_joint": 1.0, "right_ankle_pitch_joint": -0.35, "right_ankle_roll_joint": -0.12}},
+        {"t": 0.5, "targets": {"right_hip_pitch_joint": -0.55, "right_knee_joint": 1.0, "right_ankle_pitch_joint": -0.35, "right_ankle_roll_joint": -0.12}},
+        {"t": 0.7, "targets": {"right_hip_pitch_joint": -0.3, "right_knee_joint": 0.5, "right_ankle_pitch_joint": -0.18, "right_ankle_roll_joint": -0.06}},
+        {"t": 0.9, "targets": {}}
+      ]
+    }
+  ]
+}

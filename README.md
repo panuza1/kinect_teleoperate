@@ -1,3 +1,67 @@
+# Current Kinect → SONIC → G1 work
+
+**Current gate (2026-09-24): `SOFTWARE_READY` is NOT READY.** Phases 2–7
+software components and their hardware-free unit/integration checks are
+implemented, including the SDK-neutral Kinect input boundary, persisted
+calibration/floor fit, bounded per-joint recovery, R2 replay, transport
+freshness, SONIC decoder hardening, named 29-joint safety, and diagnostics.
+The Phase 8 actual-component run correctly stopped when the production decoder
+generated an out-of-range ankle-pitch target after entering streamed SMPL mode
+(left target `0.885374` rad, model maximum `0.5236` rad). The matching official
+`sonic_v1_1` and `low_latency` checkpoint/config trios were also tested; both
+produced an illegal waist-pitch target. The training/deployment scale and
+normalization agree, but the released policy contract has no per-joint residual
+envelope compatible with the authoritative mechanical limits. A compatible or
+retrained checkpoint is required. The 30-minute soak was therefore not run and
+must not be claimed. See [MuJoCo validation](docs/mujoco_validation.md).
+
+A static asymmetric residual projection was also evaluated as a new controller
+behavior. It caused repeated simulation safety resets; after strengthening the
+final guard to recheck position limits after derivative limiting, the same run
+stopped safely on a dynamically infeasible knee command. The experimental
+projection was removed. Retraining or fine-tuning with bounded,
+derivative-feasible actions remains required.
+
+The supported end-to-end implementation route is documented in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). It extends
+[`src/kinect_smpl_zmq_bridge`](src/kinect_smpl_zmq_bridge/README.md) and the
+existing SONIC controller in the sibling `GR00T-WholeBodyControl` checkout.
+
+The plan audits the current code, identifies missing safety and validation
+work, and defines sequential software, live Kinect, live MuJoCo, and real G1
+gates. Historical simulation success does not establish live Kinect or real
+G1 readiness. Real G1 stays out of this workflow until live simulation passes;
+application robot commands additionally require the real preflight gate and
+supervised session authorization.
+
+## Supported software-only check
+
+The bridge defaults to observe/no-publish.  This check builds and tests only
+the synthetic/session path; it does not open a Kinect or a robot channel.
+
+```bash
+cmake -S . -B build -DKINECT_BRIDGE_ONLY=ON -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$KINECT_SDK_PREFIX"
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 scripts/validate_pipeline.py config --config config/teleop.json
+python3 scripts/validate_pipeline.py joint-map
+python3 scripts/validate_pipeline.py retarget --case tests/fixtures/left_leg_raise.json
+```
+
+`config/sim_e2e.json` is the only checked-in profile that permits publication,
+and only to the isolated SONIC simulation endpoint on `127.0.0.1`, DDS domain
+42/`lo`. It still requires an explicit bridge `--publish --arm`. The bridge
+does not support real mode.
+
+`config/real_g1.json` is deliberately rejected by the bridge and offline
+validator.  It is a commissioning template, not an authorization to publish.
+
+The tutorial below describes the original legacy fixed-base simulation demo.
+Its Euler retargeting, robot model, and hardware-control placeholders are not
+the production whole-body SONIC path. See the plan before using its commands.
+
 # Video Demo
 
 <p align="center">

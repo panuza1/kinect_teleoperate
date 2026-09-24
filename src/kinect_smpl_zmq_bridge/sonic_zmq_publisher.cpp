@@ -33,6 +33,11 @@ void send(std::vector<std::uint8_t>& message, _zsock_t* socket) {
     }
 }
 
+std::int64_t unix_time_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 }  // namespace
 
 SonicZmqPublisher::SonicZmqPublisher(int port, const std::string& bind_host) : context_(static_cast<_zctx_t*>(zmq_ctx_new())), socket_(nullptr) {
@@ -58,7 +63,9 @@ SonicZmqPublisher::~SonicZmqPublisher() {
     if (context_) zmq_ctx_term(context_);
 }
 
-void SonicZmqPublisher::publish_pose(const SonicPoseFrame& frame, std::uint64_t frame_index) {
+void SonicZmqPublisher::publish_pose(const SonicPoseFrame& frame, std::uint64_t frame_index,
+                                     std::uint64_t epoch, std::uint64_t sequence,
+                                     std::uint64_t source_timestamp_us) {
     for (float value : frame.smpl_joints) if (!std::isfinite(value)) return;
     for (float value : frame.smpl_pose) if (!std::isfinite(value)) return;
     float quat_norm2 = 0.0f;
@@ -73,6 +80,7 @@ void SonicZmqPublisher::publish_pose(const SonicPoseFrame& frame, std::uint64_t 
     const double timestamp = frame.timestamp_monotonic_s > 0 && std::isfinite(frame.timestamp_monotonic_s)
         ? frame.timestamp_monotonic_s
         : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const std::int64_t sent_unix_us = unix_time_us();
     std::vector<std::uint8_t> message{'p','o','s','e'};
     const std::string fields =
         "{\"name\":\"smpl_joints\",\"dtype\":\"f32\",\"shape\":[1,24,3]},"
@@ -81,7 +89,11 @@ void SonicZmqPublisher::publish_pose(const SonicPoseFrame& frame, std::uint64_t 
         "{\"name\":\"joint_vel\",\"dtype\":\"f32\",\"shape\":[1,29]},"
         "{\"name\":\"body_quat\",\"dtype\":\"f32\",\"shape\":[1,4]},"
         "{\"name\":\"frame_index\",\"dtype\":\"i64\",\"shape\":[1]},"
-        "{\"name\":\"timestamp_monotonic\",\"dtype\":\"f64\",\"shape\":[1]}";
+        "{\"name\":\"timestamp_monotonic\",\"dtype\":\"f64\",\"shape\":[1]},"
+        "{\"name\":\"epoch\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"sequence\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"source_timestamp_us\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"sent_unix_us\",\"dtype\":\"i64\",\"shape\":[1]}";
     const auto h = header(fields, 3);
     message.insert(message.end(), h.begin(), h.end());
     append(message, frame.smpl_joints.data(), frame.smpl_joints.size());
@@ -91,10 +103,15 @@ void SonicZmqPublisher::publish_pose(const SonicPoseFrame& frame, std::uint64_t 
     append(message, frame.body_quat_w.data(), frame.body_quat_w.size());
     append(message, &index, 1);
     append(message, &timestamp, 1);
+    append(message, &epoch, 1);
+    append(message, &sequence, 1);
+    append(message, &source_timestamp_us, 1);
+    append(message, &sent_unix_us, 1);
     send(message, socket_);
 }
 
-void SonicZmqPublisher::publish_planner(const SonicPoseFrame& frame) {
+void SonicZmqPublisher::publish_planner(const SonicPoseFrame& frame, std::uint64_t epoch,
+                                        std::uint64_t sequence, std::uint64_t source_timestamp_us) {
     if (!std::isfinite(frame.velocity_mps[0]) || !std::isfinite(frame.velocity_mps[1])) return;
     const float vx = std::clamp(frame.velocity_mps[0], -0.15f, 0.15f);
     const float vy = std::clamp(frame.velocity_mps[1], -0.10f, 0.10f);
@@ -114,27 +131,31 @@ void SonicZmqPublisher::publish_planner(const SonicPoseFrame& frame) {
     const float z = frame.body_quat_w[3];
     const float yaw = std::atan2(2.0f * (w * z + x * y), 1.0f - 2.0f * (y * y + z * z));
     if (!std::isfinite(yaw)) return;
-    const auto now = std::chrono::steady_clock::now();
     if (!have_facing_) {
         facing_yaw_ = yaw;
         have_facing_ = true;
     } else {
-        const float dt = std::clamp(std::chrono::duration<float>(now - last_planner_time_).count(), 0.0f, 0.2f);
+        const float dt = static_cast<float>(std::clamp(frame.timestamp_monotonic_s - last_planner_timestamp_s_, 0.0, 0.2));
         const float difference = std::atan2(std::sin(yaw - facing_yaw_), std::cos(yaw - facing_yaw_));
         facing_yaw_ += std::clamp(difference, -0.20f * dt, 0.20f * dt);
     }
-    last_planner_time_ = now;
+    last_planner_timestamp_s_ = frame.timestamp_monotonic_s;
     std::array<float, 3> facing{std::cos(facing_yaw_), std::sin(facing_yaw_), 0.0f};
     const float command_speed = !moving ? 0.0f : turning ? std::max(speed, 0.10f) : speed;
     if (turning && speed <= 1e-4f) movement = facing;
     const float height = -1.0f;
+    const std::int64_t sent_unix_us = unix_time_us();
     std::vector<std::uint8_t> message{'p','l','a','n','n','e','r'};
     const std::string fields =
         "{\"name\":\"mode\",\"dtype\":\"i32\",\"shape\":[1]},"
         "{\"name\":\"movement\",\"dtype\":\"f32\",\"shape\":[3]},"
         "{\"name\":\"facing\",\"dtype\":\"f32\",\"shape\":[3]},"
         "{\"name\":\"speed\",\"dtype\":\"f32\",\"shape\":[1]},"
-        "{\"name\":\"height\",\"dtype\":\"f32\",\"shape\":[1]}";
+        "{\"name\":\"height\",\"dtype\":\"f32\",\"shape\":[1]},"
+        "{\"name\":\"epoch\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"sequence\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"source_timestamp_us\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"sent_unix_us\",\"dtype\":\"i64\",\"shape\":[1]}";
     const auto h = header(fields, 1);
     message.insert(message.end(), h.begin(), h.end());
     append(message, &mode, 1);
@@ -142,18 +163,51 @@ void SonicZmqPublisher::publish_planner(const SonicPoseFrame& frame) {
     append(message, facing.data(), facing.size());
     append(message, &command_speed, 1);
     append(message, &height, 1);
+    append(message, &epoch, 1);
+    append(message, &sequence, 1);
+    append(message, &source_timestamp_us, 1);
+    append(message, &sent_unix_us, 1);
     send(message, socket_);
 }
 
-void SonicZmqPublisher::publish_command(bool start, bool planner) {
+void SonicZmqPublisher::publish_command(bool start, bool stop, bool planner, std::uint64_t epoch,
+                                        std::uint64_t sequence, std::uint64_t source_timestamp_us) {
     const std::array<std::uint8_t, 3> values{
-        static_cast<std::uint8_t>(start), 0, static_cast<std::uint8_t>(planner)};
+        static_cast<std::uint8_t>(start), static_cast<std::uint8_t>(stop), static_cast<std::uint8_t>(planner)};
+    const std::int64_t sent_unix_us = unix_time_us();
     std::vector<std::uint8_t> message{'c','o','m','m','a','n','d'};
     const auto h = header(
         "{\"name\":\"start\",\"dtype\":\"u8\",\"shape\":[1]},"
         "{\"name\":\"stop\",\"dtype\":\"u8\",\"shape\":[1]},"
-        "{\"name\":\"planner\",\"dtype\":\"u8\",\"shape\":[1]}", 1);
+        "{\"name\":\"planner\",\"dtype\":\"u8\",\"shape\":[1]},"
+        "{\"name\":\"epoch\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"sequence\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"source_timestamp_us\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"sent_unix_us\",\"dtype\":\"i64\",\"shape\":[1]}", 2);
     message.insert(message.end(), h.begin(), h.end());
     append(message, values.data(), values.size());
+    append(message, &epoch, 1);
+    append(message, &sequence, 1);
+    append(message, &source_timestamp_us, 1);
+    append(message, &sent_unix_us, 1);
+    send(message, socket_);
+}
+
+void SonicZmqPublisher::publish_health(std::uint64_t epoch, std::uint64_t sequence,
+                                       std::uint64_t source_timestamp_us, std::uint8_t state) {
+    const std::int64_t sent_unix_us = unix_time_us();
+    std::vector<std::uint8_t> message{'h','e','a','l','t','h'};
+    const auto h = header(
+        "{\"name\":\"epoch\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"sequence\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"source_timestamp_us\",\"dtype\":\"i64\",\"shape\":[1]},"
+        "{\"name\":\"state\",\"dtype\":\"u8\",\"shape\":[1]},"
+        "{\"name\":\"sent_unix_us\",\"dtype\":\"i64\",\"shape\":[1]}", 1);
+    message.insert(message.end(), h.begin(), h.end());
+    append(message, &epoch, 1);
+    append(message, &sequence, 1);
+    append(message, &source_timestamp_us, 1);
+    append(message, &state, 1);
+    append(message, &sent_unix_us, 1);
     send(message, socket_);
 }

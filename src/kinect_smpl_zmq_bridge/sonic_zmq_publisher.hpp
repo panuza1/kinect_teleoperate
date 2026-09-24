@@ -17,14 +17,20 @@ public:
     SonicZmqPublisher(const SonicZmqPublisher&) = delete;
     SonicZmqPublisher& operator=(const SonicZmqPublisher&) = delete;
 
-    void publish_pose(const SonicPoseFrame& frame, std::uint64_t frame_index);
-    void publish_planner(const SonicPoseFrame& frame);
-    void publish_command(bool start, bool planner);
+    void publish_pose(const SonicPoseFrame& frame, std::uint64_t frame_index,
+                      std::uint64_t epoch = 0, std::uint64_t sequence = 0,
+                      std::uint64_t source_timestamp_us = 0);
+    void publish_planner(const SonicPoseFrame& frame, std::uint64_t epoch = 0,
+                         std::uint64_t sequence = 0, std::uint64_t source_timestamp_us = 0);
+    void publish_command(bool start, bool stop, bool planner, std::uint64_t epoch = 0,
+                         std::uint64_t sequence = 0, std::uint64_t source_timestamp_us = 0);
+    void publish_health(std::uint64_t epoch, std::uint64_t sequence,
+                        std::uint64_t source_timestamp_us, std::uint8_t state);
 
 private:
     _zctx_t* context_;
     _zsock_t* socket_;
     bool have_facing_ = false;
     float facing_yaw_ = 0.0f;
-    std::chrono::steady_clock::time_point last_planner_time_{};
+    double last_planner_timestamp_s_ = 0;
 };

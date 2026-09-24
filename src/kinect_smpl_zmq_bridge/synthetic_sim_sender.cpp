@@ -9,47 +9,47 @@
 #include <thread>
 
 namespace {
-void set(k4abt_skeleton_t& s, k4abt_joint_id_t id, float x, float y, float z = 1000.0f) {
+void set(BodySkeleton& s, JointId id, float x, float y, float z = 1000.0f) {
     auto& j = s.joints[id];
     j.position.xyz = {x, y, z};
     j.orientation.wxyz = {1, 0, 0, 0};
-    j.confidence_level = K4ABT_JOINT_CONFIDENCE_HIGH;
+    j.confidence_level = CONFIDENCE_HIGH;
 }
 
-k4abt_skeleton_t neutral_skeleton() {
-    k4abt_skeleton_t s{};
+BodySkeleton neutral_skeleton() {
+    BodySkeleton s{};
     for (auto& j : s.joints) {
         j.position.xyz = {0, 0, 1000};
         j.orientation.wxyz = {1, 0, 0, 0};
-        j.confidence_level = K4ABT_JOINT_CONFIDENCE_HIGH;
+        j.confidence_level = CONFIDENCE_HIGH;
     }
-    set(s, K4ABT_JOINT_PELVIS, 0, 0);
-    set(s, K4ABT_JOINT_SPINE_NAVEL, 0, -160);
-    set(s, K4ABT_JOINT_SPINE_CHEST, 0, -350);
-    set(s, K4ABT_JOINT_NECK, 0, -540);
-    set(s, K4ABT_JOINT_HEAD, 0, -710);
+    set(s, JOINT_PELVIS, 0, 0);
+    set(s, JOINT_SPINE_NAVEL, 0, -160);
+    set(s, JOINT_SPINE_CHEST, 0, -350);
+    set(s, JOINT_NECK, 0, -540);
+    set(s, JOINT_HEAD, 0, -710);
     for (int side : {-1, 1}) {
         const bool left = side < 0;
-        set(s, left ? K4ABT_JOINT_HIP_LEFT : K4ABT_JOINT_HIP_RIGHT, 100 * side, 50);
-        set(s, left ? K4ABT_JOINT_KNEE_LEFT : K4ABT_JOINT_KNEE_RIGHT, 110 * side, 430);
-        set(s, left ? K4ABT_JOINT_ANKLE_LEFT : K4ABT_JOINT_ANKLE_RIGHT, 110 * side, 790);
-        set(s, left ? K4ABT_JOINT_FOOT_LEFT : K4ABT_JOINT_FOOT_RIGHT, 110 * side, 900, 1080);
-        set(s, left ? K4ABT_JOINT_CLAVICLE_LEFT : K4ABT_JOINT_CLAVICLE_RIGHT, 140 * side, -390);
-        set(s, left ? K4ABT_JOINT_SHOULDER_LEFT : K4ABT_JOINT_SHOULDER_RIGHT, 250 * side, -400);
-        set(s, left ? K4ABT_JOINT_ELBOW_LEFT : K4ABT_JOINT_ELBOW_RIGHT, 280 * side, -200);
-        set(s, left ? K4ABT_JOINT_WRIST_LEFT : K4ABT_JOINT_WRIST_RIGHT, 300 * side, 0);
-        set(s, left ? K4ABT_JOINT_HAND_LEFT : K4ABT_JOINT_HAND_RIGHT, 310 * side, 70);
+        set(s, left ? JOINT_HIP_LEFT : JOINT_HIP_RIGHT, 100 * side, 50);
+        set(s, left ? JOINT_KNEE_LEFT : JOINT_KNEE_RIGHT, 110 * side, 430);
+        set(s, left ? JOINT_ANKLE_LEFT : JOINT_ANKLE_RIGHT, 110 * side, 790);
+        set(s, left ? JOINT_FOOT_LEFT : JOINT_FOOT_RIGHT, 110 * side, 900, 1080);
+        set(s, left ? JOINT_CLAVICLE_LEFT : JOINT_CLAVICLE_RIGHT, 140 * side, -390);
+        set(s, left ? JOINT_SHOULDER_LEFT : JOINT_SHOULDER_RIGHT, 250 * side, -400);
+        set(s, left ? JOINT_ELBOW_LEFT : JOINT_ELBOW_RIGHT, 280 * side, -200);
+        set(s, left ? JOINT_WRIST_LEFT : JOINT_WRIST_RIGHT, 300 * side, 0);
+        set(s, left ? JOINT_HAND_LEFT : JOINT_HAND_RIGHT, 310 * side, 70);
     }
     return s;
 }
 
-void raise_arm(k4abt_skeleton_t& s, bool left, float amount) {
+void raise_arm(BodySkeleton& s, bool left, float amount) {
     const float side = left ? -1.0f : 1.0f;
-    set(s, left ? K4ABT_JOINT_ELBOW_LEFT : K4ABT_JOINT_ELBOW_RIGHT,
+    set(s, left ? JOINT_ELBOW_LEFT : JOINT_ELBOW_RIGHT,
         side * 280, -200 - 330 * amount);
-    set(s, left ? K4ABT_JOINT_WRIST_LEFT : K4ABT_JOINT_WRIST_RIGHT,
+    set(s, left ? JOINT_WRIST_LEFT : JOINT_WRIST_RIGHT,
         side * 300, -700 * amount);
-    set(s, left ? K4ABT_JOINT_HAND_LEFT : K4ABT_JOINT_HAND_RIGHT,
+    set(s, left ? JOINT_HAND_LEFT : JOINT_HAND_RIGHT,
         side * 310, 70 - 820 * amount);
 }
 
@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
         const float yaw_rate = std::fabs(pose.yaw_rate_rps);
         if (speed > 0.08f || yaw_rate > 0.08f) planner_mode = true;
         else if (speed < 0.04f && yaw_rate < 0.04f) planner_mode = false;
-        publisher.publish_command(false, planner_mode);
+        publisher.publish_command(false, false, planner_mode);
         publisher.publish_pose(pose, frame_index);
         publisher.publish_planner(pose);
         if (frame_index % 30 == 0) std::cout << "synthetic_frame=" << frame_index << " phase=" << t << '\n';

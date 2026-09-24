@@ -1,6 +1,7 @@
 #pragma once
 
-#include <k4abt.h>
+#include "kinect_input.hpp"
+#include "calibration.hpp"
 
 #include <array>
 #include <cstdint>
@@ -21,8 +22,11 @@ public:
     explicit SkeletonToSmpl(float smoothing = 0.75f, bool auto_calibrate = true);
     ~SkeletonToSmpl();
 
-    bool calibrate(const std::vector<k4abt_skeleton_t>& neutral_frames);
-    bool convert(const k4abt_skeleton_t& skeleton, std::uint64_t frame_index,
+    bool calibrate(const std::vector<BodySkeleton>& neutral_frames);
+    CalibrationState calibration_state(const std::string& device_serial = {},
+                                       const std::string& mount_id = {}) const;
+    void set_calibration(const CalibrationState& calibration);
+    bool convert(const BodySkeleton& skeleton, std::uint64_t frame_index,
                  float dt_s, SonicPoseFrame& output);
 
 private:

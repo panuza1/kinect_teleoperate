@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace {
 
@@ -13,15 +14,15 @@ using Vec3 = Eigen::Vector3f;
 using Quat = Eigen::Quaternionf;
 
 constexpr float kPi = 3.14159265358979323846f;
-constexpr std::array<k4abt_joint_id_t, 24> kKinectForSmpl = {
-    K4ABT_JOINT_PELVIS, K4ABT_JOINT_HIP_LEFT, K4ABT_JOINT_HIP_RIGHT,
-    K4ABT_JOINT_SPINE_NAVEL, K4ABT_JOINT_KNEE_LEFT, K4ABT_JOINT_KNEE_RIGHT,
-    K4ABT_JOINT_SPINE_CHEST, K4ABT_JOINT_ANKLE_LEFT, K4ABT_JOINT_ANKLE_RIGHT,
-    K4ABT_JOINT_NECK, K4ABT_JOINT_FOOT_LEFT, K4ABT_JOINT_FOOT_RIGHT,
-    K4ABT_JOINT_NECK, K4ABT_JOINT_CLAVICLE_LEFT, K4ABT_JOINT_CLAVICLE_RIGHT,
-    K4ABT_JOINT_HEAD, K4ABT_JOINT_SHOULDER_LEFT, K4ABT_JOINT_SHOULDER_RIGHT,
-    K4ABT_JOINT_ELBOW_LEFT, K4ABT_JOINT_ELBOW_RIGHT, K4ABT_JOINT_WRIST_LEFT,
-    K4ABT_JOINT_WRIST_RIGHT, K4ABT_JOINT_HAND_LEFT, K4ABT_JOINT_HAND_RIGHT,
+constexpr std::array<JointId, 24> kKinectForSmpl = {
+    JOINT_PELVIS, JOINT_HIP_LEFT, JOINT_HIP_RIGHT,
+    JOINT_SPINE_NAVEL, JOINT_KNEE_LEFT, JOINT_KNEE_RIGHT,
+    JOINT_SPINE_CHEST, JOINT_ANKLE_LEFT, JOINT_ANKLE_RIGHT,
+    JOINT_NECK, JOINT_FOOT_LEFT, JOINT_FOOT_RIGHT,
+    JOINT_NECK, JOINT_CLAVICLE_LEFT, JOINT_CLAVICLE_RIGHT,
+    JOINT_HEAD, JOINT_SHOULDER_LEFT, JOINT_SHOULDER_RIGHT,
+    JOINT_ELBOW_LEFT, JOINT_ELBOW_RIGHT, JOINT_WRIST_LEFT,
+    JOINT_WRIST_RIGHT, JOINT_HAND_LEFT, JOINT_HAND_RIGHT,
 };
 
 constexpr std::array<int, 24> kSmplParents = {
@@ -36,25 +37,36 @@ const Eigen::Matrix3f kKinectToSonic = (Eigen::Matrix3f() <<
    -1.0f, 0.0f, 0.0f,
     0.0f,-1.0f, 0.0f).finished();
 
-Vec3 position_m(const k4abt_joint_t& joint) {
-    const auto& p = joint.position.xyz;
-    return kKinectToSonic * Vec3(p.x, p.y, p.z) * 0.001f;
+Eigen::Matrix3f calibration_rotation(const CalibrationState& calibration) {
+    Eigen::Matrix3f result;
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            result(row, column) = calibration.camera_to_body_rotation[row * 3 + column];
+    return result;
 }
 
-bool valid_joint(const k4abt_joint_t& joint) {
+Vec3 position_m(const JointSample& joint, const CalibrationState& calibration) {
+    const auto& p = joint.position.xyz;
+    const Vec3 base = kKinectToSonic * Vec3(p.x, p.y, p.z) * 0.001f;
+    return calibration_rotation(calibration) * base +
+        Vec3(calibration.camera_to_body_translation_m[0], calibration.camera_to_body_translation_m[1],
+             calibration.camera_to_body_translation_m[2]);
+}
+
+bool valid_joint(const JointSample& joint) {
     const auto& p = joint.position.xyz;
     const auto& q = joint.orientation.wxyz;
     const float norm2 = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
-    return joint.confidence_level >= K4ABT_JOINT_CONFIDENCE_LOW &&
+    return joint.confidence_level >= CONFIDENCE_LOW &&
            std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) &&
            std::isfinite(norm2) && norm2 > 1e-8f;
 }
 
-Quat orientation_sonic(const k4abt_joint_t& joint) {
+Quat orientation_sonic(const JointSample& joint, const CalibrationState& calibration) {
     const Quat q(joint.orientation.wxyz.w, joint.orientation.wxyz.x,
                  joint.orientation.wxyz.y, joint.orientation.wxyz.z);
     Eigen::Matrix3f r = kKinectToSonic * q.normalized().toRotationMatrix() * kKinectToSonic.transpose();
-    return Quat(r).normalized();
+    return Quat(calibration_rotation(calibration) * r * calibration_rotation(calibration).transpose()).normalized();
 }
 
 void store(const Vec3& value, std::array<float, 24 * 3>& out, int joint) {
@@ -86,6 +98,7 @@ float wrap_angle(float angle) {
 }  // namespace
 
 struct SkeletonToSmpl::Impl {
+    CalibrationState calibration;
     Quat root_calibration = Quat::Identity();
     Vec3 neutral_pelvis = Vec3::Zero();
     std::array<Quat, 24> pose_calibration{};
@@ -93,6 +106,7 @@ struct SkeletonToSmpl::Impl {
     std::array<Vec3, 24> last_joint_position{};
     std::array<bool, 24> have_orientation{};
     std::array<bool, 24> have_joint_position{};
+    std::array<float, 24> invalid_age_s{};
 
     Impl() {
         pose_calibration.fill(Quat::Identity());
@@ -106,7 +120,7 @@ SkeletonToSmpl::SkeletonToSmpl(float smoothing, bool auto_calibrate)
 
 SkeletonToSmpl::~SkeletonToSmpl() { delete impl_; }
 
-bool SkeletonToSmpl::calibrate(const std::vector<k4abt_skeleton_t>& neutral_frames) {
+bool SkeletonToSmpl::calibrate(const std::vector<BodySkeleton>& neutral_frames) {
     if (neutral_frames.empty()) return false;
     std::array<Vec3, 24> average_position{};
     std::array<Eigen::Vector4f, 24> average_quaternion{};
@@ -117,8 +131,8 @@ bool SkeletonToSmpl::calibrate(const std::vector<k4abt_skeleton_t>& neutral_fram
         for (int i = 0; i < 24; ++i) {
             const auto& joint = skeleton.joints[kKinectForSmpl[i]];
             if (!valid_joint(joint)) continue;
-            average_position[i] += position_m(joint);
-            const Quat q = orientation_sonic(joint);
+            average_position[i] += position_m(joint, impl_->calibration);
+            const Quat q = orientation_sonic(joint, impl_->calibration);
             Eigen::Vector4f coeffs = q.coeffs();
             if (counts[i] && average_quaternion[i].dot(coeffs) < 0.0f) coeffs *= -1.0f;
             average_quaternion[i] += coeffs;
@@ -136,6 +150,7 @@ bool SkeletonToSmpl::calibrate(const std::vector<k4abt_skeleton_t>& neutral_fram
     const float height = average_position[15].z() - feet_z;
     if (!std::isfinite(height) || height <= 0.5f) return false;
     body_scale_ = std::clamp(1.70f / height, 0.8f, 1.2f);
+    impl_->calibration.body_scale = body_scale_;
     impl_->root_calibration = absolute_orientation[0];
     impl_->neutral_pelvis = average_position[0];
     for (int i = 1; i < 24; ++i) {
@@ -146,9 +161,46 @@ bool SkeletonToSmpl::calibrate(const std::vector<k4abt_skeleton_t>& neutral_fram
     return true;
 }
 
-bool SkeletonToSmpl::convert(const k4abt_skeleton_t& skeleton, std::uint64_t frame_index,
+CalibrationState SkeletonToSmpl::calibration_state(const std::string& device_serial,
+                                                   const std::string& mount_id) const {
+    if (!calibrated_) throw std::runtime_error("converter is not calibrated");
+    CalibrationState state = impl_->calibration;
+    state.device_serial = device_serial;
+    state.mount_id = mount_id;
+    state.body_scale = body_scale_;
+    state.root_calibration = {impl_->root_calibration.w(), impl_->root_calibration.x(),
+                              impl_->root_calibration.y(), impl_->root_calibration.z()};
+    state.neutral_pelvis_m = {impl_->neutral_pelvis.x(), impl_->neutral_pelvis.y(), impl_->neutral_pelvis.z()};
+    for (int i = 0; i < 24; ++i) {
+        state.pose_calibration[i * 4] = impl_->pose_calibration[i].w();
+        state.pose_calibration[i * 4 + 1] = impl_->pose_calibration[i].x();
+        state.pose_calibration[i * 4 + 2] = impl_->pose_calibration[i].y();
+        state.pose_calibration[i * 4 + 3] = impl_->pose_calibration[i].z();
+    }
+    state.validate();
+    return state;
+}
+
+void SkeletonToSmpl::set_calibration(const CalibrationState& calibration) {
+    calibration.validate();
+    impl_->calibration = calibration;
+    body_scale_ = calibration.body_scale;
+    impl_->root_calibration = Quat(calibration.root_calibration[0], calibration.root_calibration[1],
+                                   calibration.root_calibration[2], calibration.root_calibration[3]).normalized();
+    impl_->neutral_pelvis = Vec3(calibration.neutral_pelvis_m[0], calibration.neutral_pelvis_m[1],
+                                 calibration.neutral_pelvis_m[2]);
+    for (int i = 0; i < 24; ++i)
+        impl_->pose_calibration[i] = Quat(calibration.pose_calibration[i * 4],
+                                          calibration.pose_calibration[i * 4 + 1],
+                                          calibration.pose_calibration[i * 4 + 2],
+                                          calibration.pose_calibration[i * 4 + 3]).normalized();
+    calibrated_ = true;
+    have_previous_ = false;
+}
+
+bool SkeletonToSmpl::convert(const BodySkeleton& skeleton, std::uint64_t frame_index,
                              float dt_s, SonicPoseFrame& output) {
-    const auto& pelvis = skeleton.joints[K4ABT_JOINT_PELVIS];
+    const auto& pelvis = skeleton.joints[JOINT_PELVIS];
     if (!valid_joint(pelvis)) {
         return false;
     }
@@ -160,17 +212,25 @@ bool SkeletonToSmpl::convert(const k4abt_skeleton_t& skeleton, std::uint64_t fra
         const auto source = kKinectForSmpl[i];
         valid[i] = valid_joint(skeleton.joints[source]);
         if (valid[i]) {
-            joints[i] = position_m(skeleton.joints[source]);
+            impl_->invalid_age_s[i] = 0;
+            joints[i] = position_m(skeleton.joints[source], impl_->calibration);
             impl_->last_joint_position[i] = joints[i];
             impl_->have_joint_position[i] = true;
-            orientations[i] = orientation_sonic(skeleton.joints[source]);
+            orientations[i] = orientation_sonic(skeleton.joints[source], impl_->calibration);
             impl_->last_orientation[i] = orientations[i];
             impl_->have_orientation[i] = true;
-        } else if (impl_->have_joint_position[i]) {
+        } else {
+            impl_->invalid_age_s[i] += std::clamp(dt_s, 0.0f, 0.2f);
+            if (impl_->invalid_age_s[i] > 0.1f) {
+                impl_->have_joint_position[i] = false;
+                impl_->have_orientation[i] = false;
+            }
+        }
+        if (!valid[i] && impl_->have_joint_position[i]) {
             joints[i] = impl_->last_joint_position[i];
             orientations[i] = impl_->have_orientation[i] ? impl_->last_orientation[i] : Quat::Identity();
-        } else {
-            joints[i] = position_m(pelvis);
+        } else if (!valid[i]) {
+            joints[i] = position_m(pelvis, impl_->calibration);
             orientations[i] = Quat::Identity();
         }
         if (!valid[i] && impl_->have_orientation[i]) {

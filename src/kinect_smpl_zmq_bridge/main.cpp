@@ -1,7 +1,7 @@
 #include "bridge_session.hpp"
+#include "bridge_config.hpp"
+#include "kinect_input.hpp"
 #include "sonic_zmq_publisher.hpp"
-
-#include <k4a/k4a.h>
 
 #include <atomic>
 #include <chrono>
@@ -38,11 +38,17 @@ const char* state_name(BridgeState state) {
 
 struct Options {
     int port = 5556;
+    bool publish = false;
+    bool arm = false;
+    bool fast = false;
     bool debug_skeleton = false;
     bool cpu = false;
     std::string model;
     std::string record;
     std::string replay;
+    std::string config_path;
+    std::optional<BridgeMode> mode;
+    BridgeConfig bridge_config{};
 };
 
 Options parse(int argc, char** argv) {
@@ -50,40 +56,45 @@ Options parse(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) options.port = std::stoi(argv[++i]);
+        else if (arg == "--config" && i + 1 < argc) options.config_path = argv[++i];
+        else if (arg == "--mode" && i + 1 < argc) options.mode = parse_bridge_mode(argv[++i]);
+        else if (arg == "--publish") options.publish = true;
+        else if (arg == "--arm") options.arm = true;
+        else if (arg == "--no-publish") options.publish = false;
+        else if (arg == "--fast") options.fast = true;
         else if (arg == "--record" && i + 1 < argc) options.record = argv[++i];
         else if (arg == "--replay" && i + 1 < argc) options.replay = argv[++i];
         else if (arg == "--model" && i + 1 < argc) options.model = argv[++i];
         else if (arg == "--debug-skeleton") options.debug_skeleton = true;
         else if (arg == "--cpu") options.cpu = true;
         else if (i == 1 && !arg.empty() && arg[0] != '-') options.port = std::stoi(arg);
-        else throw std::runtime_error("usage: kinect_smpl_zmq_bridge [--port 5556] [--cpu] [--model onnx-file] [--debug-skeleton] [--record file | --replay file]");
+        else throw std::runtime_error("usage: kinect_smpl_zmq_bridge [--config file] [--mode observe|compute|sim] [--publish --arm] [--no-publish] [--fast] [--port 5556] [--cpu] [--model onnx-file] [--debug-skeleton] [--record file | --replay file]");
     }
+    if (!options.config_path.empty()) options.bridge_config = BridgeConfig::load(options.config_path);
+    if (options.mode) options.bridge_config.mode = *options.mode;
+    options.bridge_config.validate();
+    options.port = options.bridge_config.port;
+    options.cpu = options.cpu || options.bridge_config.cpu;
+    options.debug_skeleton = options.debug_skeleton || options.bridge_config.debug_skeleton;
+    if (options.model.empty()) options.model = options.bridge_config.model_path;
+    if (options.publish && !options.bridge_config.may_publish())
+        throw std::runtime_error("publishing requires an isolated sim configuration with no_publish=false");
+    if (options.arm && !options.publish) throw std::runtime_error("--arm requires --publish");
     if (options.port < 1 || options.port > 65535 || (!options.record.empty() && !options.replay.empty()))
         throw std::runtime_error("invalid port or simultaneous --record and --replay");
     return options;
 }
 
-struct Sensor {
-    k4a_device_t device = nullptr;
-    k4abt_tracker_t tracker = nullptr;
-    bool cameras_started = false;
-    ~Sensor() {
-        if (tracker) { k4abt_tracker_shutdown(tracker); k4abt_tracker_destroy(tracker); }
-        if (cameras_started) k4a_device_stop_cameras(device);
-        if (device) k4a_device_close(device);
-    }
-};
-
-void print_skeleton(const SkeletonSample& sample, BridgeState state) {
-    constexpr k4abt_joint_id_t ids[] = {
-        K4ABT_JOINT_PELVIS, K4ABT_JOINT_SPINE_NAVEL, K4ABT_JOINT_SPINE_CHEST,
-        K4ABT_JOINT_NECK, K4ABT_JOINT_HEAD,
-        K4ABT_JOINT_SHOULDER_LEFT, K4ABT_JOINT_ELBOW_LEFT, K4ABT_JOINT_WRIST_LEFT,
-        K4ABT_JOINT_SHOULDER_RIGHT, K4ABT_JOINT_ELBOW_RIGHT, K4ABT_JOINT_WRIST_RIGHT,
-        K4ABT_JOINT_HIP_LEFT, K4ABT_JOINT_KNEE_LEFT, K4ABT_JOINT_ANKLE_LEFT,
-        K4ABT_JOINT_HIP_RIGHT, K4ABT_JOINT_KNEE_RIGHT, K4ABT_JOINT_ANKLE_RIGHT
+void print_skeleton(const SkeletonSample& sample, const BridgeResult& result) {
+    constexpr JointId ids[] = {
+        JOINT_PELVIS, JOINT_SPINE_NAVEL, JOINT_SPINE_CHEST,
+        JOINT_NECK, JOINT_HEAD,
+        JOINT_SHOULDER_LEFT, JOINT_ELBOW_LEFT, JOINT_WRIST_LEFT,
+        JOINT_SHOULDER_RIGHT, JOINT_ELBOW_RIGHT, JOINT_WRIST_RIGHT,
+        JOINT_HIP_LEFT, JOINT_KNEE_LEFT, JOINT_ANKLE_LEFT,
+        JOINT_HIP_RIGHT, JOINT_KNEE_RIGHT, JOINT_ANKLE_RIGHT
     };
-    std::cout << "state=" << state_name(state) << " body=" << sample.body_id
+    std::cout << "state=" << state_name(result.state) << " body=" << sample.body_id
               << " device_us=" << sample.device_timestamp_us << '\n';
     for (const auto id : ids) {
         const auto& j = sample.skeleton.joints[id];
@@ -92,13 +103,33 @@ void print_skeleton(const SkeletonSample& sample, BridgeState state) {
                   << j.orientation.wxyz.x << ',' << j.orientation.wxyz.y << ','
                   << j.orientation.wxyz.z << " confidence=" << j.confidence_level << '\n';
     }
+    std::cout << "smpl_root_m=" << result.pose.smpl_joints[0] << ','
+              << result.pose.smpl_joints[1] << ',' << result.pose.smpl_joints[2]
+              << " body_quat_wxyz=" << result.pose.body_quat_w[0] << ','
+              << result.pose.body_quat_w[1] << ',' << result.pose.body_quat_w[2] << ','
+              << result.pose.body_quat_w[3] << " velocity_mps="
+              << result.pose.velocity_mps[0] << ',' << result.pose.velocity_mps[1]
+              << ',' << result.pose.velocity_mps[2] << " yaw_rate_rps="
+              << result.pose.yaw_rate_rps << '\n';
 }
 
-void publish(const BridgeResult& result, SonicZmqPublisher* publisher, std::uint64_t index) {
-    if (!publisher || !result.publish) return;
-    publisher->publish_command(false, result.planner);
-    publisher->publish_pose(result.pose, index);
-    publisher->publish_planner(result.pose);
+void publish(const BridgeResult& result, SonicZmqPublisher* publisher, std::uint64_t index,
+             bool start = false) {
+    if (!publisher) return;
+    publisher->publish_health(result.epoch, result.sequence, result.source_timestamp_us,
+                              static_cast<std::uint8_t>(result.state));
+    if (result.stop) {
+        publisher->publish_command(false, true, false, result.epoch, result.sequence,
+                                   result.source_timestamp_us);
+        return;
+    }
+    if (!result.publish || !result.dispatch) return;
+    publisher->publish_command(start, false, result.planner, result.epoch, result.sequence,
+                               result.source_timestamp_us);
+    publisher->publish_pose(result.pose, index, result.epoch, result.sequence,
+                            result.source_timestamp_us);
+    publisher->publish_planner(result.pose, result.epoch, result.sequence,
+                               result.source_timestamp_us);
 }
 
 bool same_pose(const SonicPoseFrame& a, const SonicPoseFrame& b) {
@@ -119,28 +150,33 @@ void replay(const Options& options) {
     std::ifstream file(options.replay, std::ios::binary);
     if (!file) throw std::runtime_error("cannot open Kinect trace: " + options.replay);
     std::unique_ptr<SonicZmqPublisher> publisher;
-    if (!options.debug_skeleton) publisher = std::make_unique<SonicZmqPublisher>(options.port, "127.0.0.1");
-    BridgeSession session;
+    if (options.publish) publisher = std::make_unique<SonicZmqPublisher>(options.port, options.bridge_config.bind_host);
+    BridgeSession session(options.bridge_config);
     BridgeTraceFrame frame;
     std::uint64_t first_time = 0, previous_time = 0, index = 0;
     const auto start = std::chrono::steady_clock::now();
+    bool start_pending = false;
     while (running && read_trace_frame(file, frame)) {
         if (!first_time) first_time = frame.time_us;
         if (frame.time_us < previous_time || frame.time_us - first_time > 3600000000ULL)
             throw std::runtime_error("invalid Kinect trace timestamps");
         previous_time = frame.time_us;
-        std::this_thread::sleep_until(start + std::chrono::microseconds(frame.time_us - first_time));
+        if (!options.fast)
+            std::this_thread::sleep_until(start + std::chrono::microseconds(frame.time_us - first_time));
         const auto sample = frame.has_body ? std::optional<SkeletonSample>(frame.sample) : std::nullopt;
         const BridgeResult result = frame.capture_timeout ? session.timeout(frame.time_us)
                                                           : session.process(sample, frame.time_us);
+        if (publisher && options.arm && result.state == BridgeState::READY)
+            start_pending = session.request_arm();
         if (result.state != frame.result.state || result.publish != frame.result.publish ||
             result.planner != frame.result.planner ||
             (result.publish && !same_pose(result.pose, frame.result.pose)))
             throw std::runtime_error("Kinect trace replay diverged at frame " + std::to_string(index));
-        if (options.debug_skeleton && sample && index % 30 == 0) print_skeleton(*sample, result.state);
+        if (options.debug_skeleton && sample && index % 30 == 0) print_skeleton(*sample, result);
         BridgeResult current = result;
         current.pose.timestamp_monotonic_s = static_cast<double>(now_us()) / 1e6;
-        publish(current, publisher.get(), index++);
+        publish(current, publisher.get(), index++, start_pending && current.dispatch);
+        if (current.dispatch) start_pending = false;
     }
     std::cout << "replayed_frames=" << index << '\n';
 }
@@ -148,28 +184,8 @@ void replay(const Options& options) {
 void live(const Options& options) {
     if (!options.model.empty() && !std::filesystem::is_regular_file(options.model))
         throw std::runtime_error("Body Tracking model not found: " + options.model);
-    Sensor sensor;
-    if (k4a_device_get_installed_count() == 0)
-        throw std::runtime_error("Azure Kinect DK not detected; connect it to USB 3.x");
-    if (k4a_device_open(0, &sensor.device) != K4A_RESULT_SUCCEEDED)
-        throw std::runtime_error("Azure Kinect DK detected but could not be opened; check USB, power, and udev permissions");
-    k4a_device_configuration_t config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
-    config.color_format = K4A_IMAGE_FORMAT_COLOR_MJPG;
-    config.color_resolution = K4A_COLOR_RESOLUTION_720P;
-    config.depth_mode = K4A_DEPTH_MODE_NFOV_UNBINNED;
-    config.camera_fps = K4A_FRAMES_PER_SECOND_30;
-    config.synchronized_images_only = true;
-    if (k4a_device_start_cameras(sensor.device, &config) != K4A_RESULT_SUCCEEDED)
-        throw std::runtime_error("failed to start Kinect RGB/depth cameras");
-    sensor.cameras_started = true;
-    k4a_calibration_t calibration{};
-    if (k4a_device_get_calibration(sensor.device, config.depth_mode, config.color_resolution, &calibration) != K4A_RESULT_SUCCEEDED)
-        throw std::runtime_error("failed to get Kinect calibration");
-    auto tracker_config = K4ABT_TRACKER_CONFIG_DEFAULT;
-    if (options.cpu) tracker_config.processing_mode = K4ABT_TRACKER_PROCESSING_MODE_CPU;
-    if (!options.model.empty()) tracker_config.model_path = options.model.c_str();
-    if (k4abt_tracker_create(&calibration, tracker_config, &sensor.tracker) != K4A_RESULT_SUCCEEDED)
-        throw std::runtime_error("failed to create Kinect Body Tracking tracker; try --cpu if CUDA is incompatible");
+    KinectInput input(options.bridge_config);
+    input.open();
 
     std::ofstream recording;
     if (!options.record.empty()) {
@@ -177,106 +193,103 @@ void live(const Options& options) {
         if (!recording) throw std::runtime_error("cannot create Kinect trace: " + options.record);
         write_trace_header(recording);
     }
+    std::ofstream telemetry;
+    if (!options.bridge_config.telemetry_path.empty()) {
+        const std::filesystem::path telemetry_path(options.bridge_config.telemetry_path);
+        if (telemetry_path.has_parent_path()) std::filesystem::create_directories(telemetry_path.parent_path());
+        telemetry.open(telemetry_path, std::ios::app);
+        if (!telemetry) throw std::runtime_error("cannot create telemetry log: " + telemetry_path.string());
+    }
     std::unique_ptr<SonicZmqPublisher> publisher;
-    if (!options.debug_skeleton) publisher = std::make_unique<SonicZmqPublisher>(options.port, "127.0.0.1");
-    BridgeSession session;
-    std::optional<std::uint32_t> tracked_body_id;
+    if (options.publish) publisher = std::make_unique<SonicZmqPublisher>(options.port, options.bridge_config.bind_host);
+    BridgeSession session(options.bridge_config);
     std::uint64_t index = 0, metric_start = now_us();
     std::uint64_t capture_count = 0, tracking_count = 0, body_count = 0,
                   bridge_count = 0, publish_count = 0;
     double latency_ms_sum = 0;
     BridgeState last_state = BridgeState::NO_BODY;
-    bool tracking_pending = false;
-    std::uint64_t queued_at_us = 0;
+    bool arm_requested = options.arm;
+    bool start_pending = false;
     while (running) {
-        k4a_capture_t capture = nullptr;
-        const auto capture_status = k4a_device_get_capture(sensor.device, &capture, 100);
-        if (capture_status == K4A_WAIT_RESULT_FAILED)
-            throw std::runtime_error("Kinect RGB/depth capture failed");
-        std::optional<SkeletonSample> sample;
-        bool capture_timeout = true;
-        if (capture_status == K4A_WAIT_RESULT_SUCCEEDED) {
-            k4a_image_t color = k4a_capture_get_color_image(capture);
-            k4a_image_t depth = k4a_capture_get_depth_image(capture);
-            if (color && depth) ++capture_count;
-            if (color) k4a_image_release(color);
-            if (depth) k4a_image_release(depth);
-            if (color && depth && !tracking_pending) {
-                const auto status = k4abt_tracker_enqueue_capture(sensor.tracker, capture, 100);
-                if (status == K4A_WAIT_RESULT_FAILED) {
-                    k4a_capture_release(capture);
-                    throw std::runtime_error("Kinect Body Tracking enqueue failed");
-                }
-                if (status == K4A_WAIT_RESULT_SUCCEEDED) {
-                    tracking_pending = true;
-                    queued_at_us = now_us();
-                }
-            }
-            k4a_capture_release(capture);
-        }
-        if (tracking_pending) {
-            k4abt_frame_t body_frame = nullptr;
-            const auto status = k4abt_tracker_pop_result(sensor.tracker, &body_frame, 100);
-            if (status == K4A_WAIT_RESULT_FAILED)
-                throw std::runtime_error("Kinect Body Tracking result failed");
-            if (status == K4A_WAIT_RESULT_SUCCEEDED) {
-                tracking_pending = false;
-                capture_timeout = false;
-                ++tracking_count;
-                const auto count = k4abt_frame_get_num_bodies(body_frame);
-                std::uint32_t selected = count;
-                for (std::uint32_t i = 0; i < count; ++i)
-                    if (tracked_body_id && k4abt_frame_get_body_id(body_frame, i) == *tracked_body_id) selected = i;
-                if (selected == count && count) selected = 0;
-                if (selected < count) {
-                    SkeletonSample body;
-                    body.body_id = k4abt_frame_get_body_id(body_frame, selected);
-                    body.device_timestamp_us = k4abt_frame_get_device_timestamp_usec(body_frame);
-                    if (k4abt_frame_get_body_skeleton(body_frame, selected, &body.skeleton) == K4A_RESULT_SUCCEEDED) {
-                        sample = body;
-                        tracked_body_id = body.body_id;
-                    }
-                }
-                k4abt_frame_release(body_frame);
-            }
-        }
+        const auto queued_at_us = now_us();
+        const KinectFrame frame = input.poll(100);
         const std::uint64_t time_us = now_us();
-        if (sample && time_us - queued_at_us > 500000) {
-            sample.reset();
-            capture_timeout = true;
+        const bool capture_timeout = frame.event == AcquisitionEvent::TIMEOUT;
+        if (frame.event == AcquisitionEvent::DISCONNECTED || frame.event == AcquisitionEvent::TRACKER_ERROR) {
+            session.reset_epoch();
+            arm_requested = false;
+            int backoff_ms = 100;
+            while (running) {
+                try {
+                    input.reconnect();
+                    std::cerr << "Kinect reconnected; session remains disarmed" << '\n';
+                    break;
+                } catch (const std::exception& error) {
+                    std::cerr << "Kinect reconnect failed: " << error.what() << '\n';
+                    std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+                    backoff_ms = std::min(backoff_ms * 2, 2000);
+                }
+            }
+            continue;
         }
-        const BridgeResult result = capture_timeout ? session.timeout(time_us) : session.process(sample, time_us);
+        if (frame.color_timestamp_us && frame.depth_timestamp_us) ++capture_count;
+        if (!capture_timeout) ++tracking_count;
+        const BridgeResult result = capture_timeout ? session.timeout(time_us)
+                                                    : session.process(frame.bodies, time_us);
+        if (publisher && arm_requested && result.state == BridgeState::READY) {
+            start_pending = session.request_arm();
+            arm_requested = false;
+        }
         if (result.publish) ++bridge_count;
         if (result.state != last_state) {
             std::cout << "bridge_state=" << state_name(result.state) << '\n';
             last_state = result.state;
         }
-        if (options.debug_skeleton && sample && index % 30 == 0) print_skeleton(*sample, result.state);
+        if (options.debug_skeleton && frame.bodies.size() == 1 && index % 30 == 0)
+            print_skeleton(frame.bodies.front(), result);
         if (publisher && result.publish) {
-            publish(result, publisher.get(), index);
+            publish(result, publisher.get(), index, start_pending && result.dispatch);
+            if (result.dispatch) start_pending = false;
             ++publish_count;
         }
-        if (sample) {
+        if (frame.bodies.size() == 1) {
             ++body_count;
             latency_ms_sum += static_cast<double>(time_us - queued_at_us) / 1000.0;
         }
         if (recording) {
             BridgeTraceFrame trace;
             trace.time_us = time_us;
-            trace.has_body = sample.has_value();
+            trace.has_body = frame.bodies.size() == 1;
             trace.capture_timeout = capture_timeout;
-            if (sample) trace.sample = *sample;
+            if (trace.has_body) trace.sample = frame.bodies.front();
             trace.result = result;
             write_trace_frame(recording, trace);
         }
         ++index;
         if (time_us - metric_start >= 1000000) {
             const double seconds = static_cast<double>(time_us - metric_start) / 1e6;
-            std::cout << "kinect_fps=" << capture_count / seconds << " tracking_fps=" << tracking_count / seconds
-                      << " bridge_fps=" << bridge_count / seconds << " zmq_fps=" << publish_count / seconds
-                      << " capture_to_publish_ms=" << (body_count ? latency_ms_sum / body_count : 0)
-                      << " estimated_capture_to_sim_ms=" << (body_count ? latency_ms_sum / body_count + 25.0 : 0)
+            const double capture_fps = capture_count / seconds;
+            const double tracking_fps = tracking_count / seconds;
+            const double bridge_fps = bridge_count / seconds;
+            const double zmq_fps = publish_count / seconds;
+            const double latency_ms = body_count ? latency_ms_sum / body_count : 0;
+            std::cout << "kinect_fps=" << capture_fps << " tracking_fps=" << tracking_fps
+                      << " bridge_fps=" << bridge_fps << " zmq_fps=" << zmq_fps
+                      << " capture_to_publish_ms=" << latency_ms
+                      << " estimated_capture_to_sim_ms=" << latency_ms + 25.0
                       << " state=" << state_name(result.state) << '\n';
+            if (telemetry) {
+                const auto health = session.health();
+                telemetry << "{\"time_us\":" << time_us << ",\"kinect_fps\":" << capture_fps
+                          << ",\"tracking_fps\":" << tracking_fps << ",\"bridge_fps\":" << bridge_fps
+                          << ",\"zmq_fps\":" << zmq_fps << ",\"dropped_frames\":"
+                          << (capture_count > tracking_count ? capture_count - tracking_count : 0)
+                          << ",\"capture_to_publish_ms\":" << latency_ms
+                          << ",\"accepted\":" << health.accepted << ",\"rejected\":" << health.rejected
+                          << ",\"epoch\":" << health.epoch << ",\"armed\":"
+                          << (health.armed ? "true" : "false") << "}\n";
+                telemetry.flush();
+            }
             capture_count = tracking_count = body_count = bridge_count = publish_count = 0;
             latency_ms_sum = 0;
             metric_start = time_us;

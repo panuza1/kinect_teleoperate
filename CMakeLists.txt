@@ -7,14 +7,19 @@ set(CMAKE_POLICY_DEFAULT_CMP0063 NEW)
 
 project(kinect_teleoperate LANGUAGES C CXX  VERSION 1.4)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_STANDARD 99)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
 
-FIND_PACKAGE(k4a REQUIRED)
-FIND_PACKAGE(k4abt REQUIRED)
+option(KINECT_ENABLE_HARDWARE "Build Azure Kinect acquisition support" ON)
+if (KINECT_ENABLE_HARDWARE)
+    find_package(k4a REQUIRED)
+    find_package(k4abt REQUIRED)
+endif()
 
 # These specific settings tell the loader to search the directory of the
 # executable for shared objects. This is done on Linux to emulate the default
@@ -38,6 +43,7 @@ if ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_C_COMPILER_ID}" STREQUAL
 endif()
 
 option(KINECT_BRIDGE_ONLY "Build only the Kinect to SONIC bridge" OFF)
+option(KINECT_BUILD_LEGACY_DEMO "Build the legacy fixed-base Kinect demonstration" ON)
 if (KINECT_BRIDGE_ONLY)
     add_subdirectory(src/kinect_smpl_zmq_bridge)
 else()

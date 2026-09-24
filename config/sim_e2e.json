@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "mode": "sim",
+  "no_publish": false,
+  "debug_skeleton": false,
+  "cpu": true,
+  "port": 5556,
+  "bind_host": "127.0.0.1",
+  "model_path": "",
+  "telemetry_path": "",
+  "calibration_path": "",
+  "device_serial": "",
+  "mount_id": "software-fixture",
+  "calibration_required": false,
+  "selection": {},
+  "timeouts": {"tracking_inhibit_ms": 100, "tracking_stop_ms": 200, "joint_hold_ms": 100},
+  "locomotion": {
+    "enabled": true,
+    "max_forward_mps": 0.15,
+    "max_lateral_mps": 0.10,
+    "max_yaw_rps": 0.20,
+    "max_linear_accel_mps2": 0.5,
+    "max_yaw_accel_rps2": 0.8
+  }
+}
