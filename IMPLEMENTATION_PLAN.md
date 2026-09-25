@@ -859,9 +859,41 @@ Execution evidence (all software-only; no Kinect or G1 opened; DDS only on isola
 | SOFTWARE_READY health manifest | BLOCKED because the official-policy and bounded-transform production reports are invalid gate evidence; `artifacts/software/gate.json` SHA-256 `873c9fd5bb8e73fbfaa38e81c15137ce6f45cd5a9d253f53f2b1a0e658ce8616` |
 | 30-minute software soak | NOT RUN after all three released variants and the bounded-transform experiment failed the zero-illegal-target/zero-reset prerequisites; running it cannot convert a prerequisite failure into a pass |
 
-Current strict gates: SOFTWARE_READY **NOT READY** (all three official released policy variants violate an authoritative raw joint limit; P6 checkpoint compatibility, sequential P7 completion and P8 soak remain blocked); KINECT_READY **HARDWARE_VALIDATION_REQUIRED** and cannot start until SOFTWARE_READY; SIM_LIVE_READY **HARDWARE_VALIDATION_REQUIRED** after both earlier gates; REAL_G1_PREFLIGHT_READY **HARDWARE_VALIDATION_REQUIRED**; REAL_G1_READY **HARDWARE_VALIDATION_REQUIRED**. Historical approximate SIM_READY is not one of these strict passes.
+### Feasible-policy continuation — 2026-09-24
 
-Resume at Phase6 by retraining/finetuning SONIC with a per-joint bounded, derivative-feasible action parameterization derived from the authoritative default angles, scales and limits (or supply a checkpoint already trained and proven under that exact contract). Validate that artifact on the retained trace (SHA-256 `d02f905071dded351ab64412ef81ad8c97def0800f63210599dc7effbf8ea25f`) before accepting it. Do not reintroduce static projection, widen model limits, remove the final guard, squash/rescale outputs post hoc, or rely on MuJoCo clipping. After every target is statically and dynamically feasible, rerun P6/P7 suites, the actual closed loop, and only then the required 1,800-second zero-reset soak. Phase9 remains blocked until `SOFTWARE_READY` passes; its first authorized Kinect-only command is documented in `docs/hardware_setup.md`.
+| Check | Result |
+|---|---|
+| Main-branch baseline | Both working trees began at their pushed `origin/main`: Kinect `3bbb209383320f22fbc542574be2f001ae85de9f`, SONIC `89926163f772472ce2974258223fa4add35a66b2`. |
+| Training/deployment action parity | PASS for the inspectable contract: the training action reuses `G1_ISAACLab_ORDER`; strict construction/reset assertions require the resolved 29 names, nominal offsets and scales to equal deployment; the feasible config disables offset randomization; Python/C++ transform parity passes. Actual IsaacLab instantiation is BLOCKED because this host has no Isaac Lab/Isaac Sim runtime. |
+| Released-checkpoint production smoke | **FAIL:** with the dynamically-feasible action enabled, the unchanged released checkpoint entered CONTROL and moved the simulated G1, but caused 24 MuJoCo safety resets and only 0.9 s maximum uninterrupted simulation before final fail-safe rejection. `max_cmd_delta=2.5690` rad, `max_joint_delta=2.6787` rad, `hand_cmds=0`. Report: `artifacts/software/2026-09-24-feasible-policy/smoke-report.json`, SHA-256 `58ae84cbd5462002eb2912ef7541762981f5ac74a9cccd0ee36db9c2047681d3`. |
+| Functional E2E acceptance | FAIL safely: response thresholds were exceeded, proving actual response, but zero-reset/zero-rejection stability criteria failed. The validator now also fails no-motion runs and any observed Dex3 command. |
+| Body/hand publication separation | PASS in unit/build and production smoke: `--no-hand-publish` left body motor DDS enabled and the simulator observed zero hand commands. `--no-command-publish` still disables both. |
+| Fine-tune debug attempt | BLOCKED before environment creation: `sonic_release_feasible.yaml` + released checkpoint `e6bdab3f…` reported Isaac Lab absent. Required motion datasets are absent; local GPU is RTX 3050 Laptop, 4 GiB. Log SHA-256 `7af41815857f6099ab06bef8090f9c85384b13ea9f04f4acc0587dc7f038a28f`. Fine-tuning must run on a provisioned Isaac Lab 2.3+ training machine. |
+| Re-run hardware-free checks | PASS: Kinect Release CTest 4/4; Kinect ASan/UBSan 4/4; Python 10/10; SONIC Python 10/10; SONIC C++ 8/8 Release and 8/8 ASan/UBSan; config/joint-map/left-leg/replay validators PASS. No Kinect or G1 was opened. |
+| 1,800-second soak | NOT RUN: the short smoke is a mandatory prerequisite and failed. |
+| SOFTWARE_READY manifest | BLOCKED on the failed smoke evidence; `artifacts/software/2026-09-24-feasible-policy/software-ready-manifest.json`, SHA-256 `a1de1d0ada3e5af17146f5e7945424172c82fbff080f0b331ef85a953a83f2e0`. |
+
+Current strict gates: SOFTWARE_READY **NOT READY**. The production action
+definition is now bounded and parity-checked, but the released policy was
+trained for the previous action semantics and is unstable under the new
+history-dependent envelope. P6 checkpoint compatibility, sequential P7
+completion and P8 soak remain blocked until fine-tuning succeeds. KINECT_READY
+is **HARDWARE_VALIDATION_REQUIRED** and cannot start until SOFTWARE_READY;
+SIM_LIVE_READY, REAL_G1_PREFLIGHT_READY and REAL_G1_READY remain similarly
+blocked. Historical approximate SIM_READY is not one of these strict passes.
+
+Resume at Phase6 on a provisioned training machine with:
+`python gear_sonic/train_agent_trl.py +exp=manager/universal_token/all_modes/sonic_release_feasible +checkpoint=sonic_release/last.pt num_envs=16 headless=True ++algo.config.num_learning_iterations=5`
+for the debug run, then scale only after it is stable. Export the matching
+encoder, decoder and observation/config artifacts and validate them on the
+retained trace (SHA-256
+`d02f905071dded351ab64412ef81ad8c97def0800f63210599dc7effbf8ea25f`).
+Do not reintroduce static projection, widen model limits, remove the final
+guard, squash/rescale outputs post hoc, or rely on MuJoCo clipping. After the
+new checkpoint passes the smoke with zero resets/rejections and functional
+response, rerun P6/P7 suites, production E2E, and only then the 1,800-second
+soak. Phase9 remains blocked until `SOFTWARE_READY` passes; its first authorized
+Kinect-only command is documented in `docs/hardware_setup.md`.
 
 ## 16. Strict execution order for GPT-5.6
 
@@ -882,3 +914,28 @@ Resume at Phase6 by retraining/finetuning SONIC with a per-joint bounded, deriva
 15. Mark REAL_G1_READY only after section10 criteria and reviewed physical evidence are complete. Record exact supported envelope and operating procedure. Until then report the highest actually achieved gate and the concrete blocker, never “almost hardware ready.”
 
 Dependency chain: `P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 [SOFTWARE_READY] → P9 → P10 [KINECT_READY] → P11 [SIM_LIVE_READY] → P12 [REAL_G1_PREFLIGHT_READY, still zero application robot commands] → P13 [Stages4–5] → P14 [Stages6–7, REAL_G1_READY]`.
+
+## Stock SONIC input-baseline continuation — 2026-09-24
+
+This entry supersedes the previous proposed fine-tuning next step for the
+current task direction. No Kinect production path may enable
+`DynamicActionEnvelope`; no SONIC retraining/fine-tuning was performed. Both
+experiments used the official matching release artifacts and original action
+scaling in the isolated production ZMQ → SONIC → DDS → floating-base MuJoCo
+path, with `--no-hand-publish` and no physical hardware.
+
+| Check | Result |
+|---|---|
+| Official release artifacts | PASS: decoder SHA-256 `c7241a123eaa36b5d64bad19540efde93cac1ad443bd4572fd12ca99898118ed`; encoder `013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3`; observation config `466d05947c78af6c76388adfb86e3a2a77b2a1d921a64883ed3d085ebf58de1`. |
+| Stock G1 model contract | PASS: training MJCF/URDF, stock simulator XML and deployment XMLs agree on the 29 names/order/limits; `isaaclab_to_mujoco` is exact. The stock config uses `scene_43dof.xml` and PR ankle mode. Left ankle pitch is `[-0.87267,0.5236]`; right ankle roll is `[-0.2618,0.2618]`. |
+| SONIC own-reference stock baseline | PASS: entered CONTROL and ran 35.9 simulated seconds with zero active-run reset/fall, measurable joint response and Dex3 commands 0. Maximum commanded/measured displacement was `2.1028`/`1.4144` rad. |
+| ZMQ/SMPL contract | PASS: `[1,24,3]` SMPL joints, `[1,21,3]` SMPL pose, canonical order, root-local SONIC axes/meters/wxyz orientation, monotonic epoch/sequence/frame/source timing, 994D policy and 1762D encoder observations. The 30 Hz single-frame publisher matches SONIC's live-camera contract; `StreamedMotionMerger` builds the future window for the 50 Hz controller. |
+| Kinect deterministic replay production E2E | PASS: all 1,801 frames replayed, streamed-motion/SMPL/CONTROL entered, and 60.6 active simulated seconds completed with zero reset/fall and Dex3 commands 0. Maximum commanded/measured displacement was `2.4360`/`1.5564` rad. |
+| Root-cause attribution | The failure was a locally added strict desired-setpoint contract applied to a stock PD controller. The official model constrains physical joints/actuators; an out-of-range desired setpoint is not proof that simulated q exceeds its range. In `SONIC_SIM_ORT` the extra guard now audits without altering stock commands; non-simulator builds remain enforcing. |
+| Hardware-free tests | PASS: bridge Release CTest 4/4, Python 10/10, SONIC Python 10/10 and SONIC C++ 8/8. No physical hardware was opened. |
+
+This input-baseline phase is complete. No policy modification, training,
+resampling or long soak is required for its acceptance. The minimum next step
+is Phase 9 Kinect-only acquisition, reconnect and physical coordinate/
+calibration validation when hardware is available. No Kinect or G1 hardware
+gate is represented here as passed.

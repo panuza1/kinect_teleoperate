@@ -325,6 +325,12 @@ def command_sim_validate(args: argparse.Namespace) -> int:
         (float(sim_time), int(resets))
         for sim_time, resets in re.findall(r"sim_time=([0-9.]+)s.*resets=([0-9]+)", simulator)
     ]
+    functional = [
+        (float(command), float(joint), int(hands))
+        for command, joint, hands in re.findall(
+            r"max_cmd_delta=([0-9.]+)rad max_joint_delta=([0-9.]+)rad hand_cmds=([01])", simulator
+        )
+    ]
     failures = []
     if "transitioning to CONTROL state" not in controller:
         failures.append("controller never entered CONTROL")
@@ -337,9 +343,20 @@ def command_sim_validate(args: argparse.Namespace) -> int:
         failures.append(f"simulated time {max_sim_time:.3f}s below {args.min_sim_time:.3f}s")
     if max_resets:
         failures.append(f"simulation reset count {max_resets}")
+    max_command_delta = max((value[0] for value in functional), default=0.0)
+    max_joint_delta = max((value[1] for value in functional), default=0.0)
+    if max_command_delta < args.min_command_delta:
+        failures.append(f"command response {max_command_delta:.4f} rad below {args.min_command_delta:.4f} rad")
+    if max_joint_delta < args.min_joint_delta:
+        failures.append(f"joint response {max_joint_delta:.4f} rad below {args.min_joint_delta:.4f} rad")
+    if any(value[2] for value in functional):
+        failures.append("Dex3 hand command observed")
     result = base_report("PASS" if not failures else "FAIL")
     result.update({"controller_log": str(args.controller_log), "sim_log": str(args.sim_log),
                    "simulated_seconds": max_sim_time, "resets": max_resets,
+                   "max_command_delta_rad": max_command_delta,
+                   "max_joint_delta_rad": max_joint_delta,
+                   "hand_commands_observed": any(value[2] for value in functional),
                    "failures": failures})
     write_report(args.report, result)
     return 0 if not failures else 1
@@ -418,6 +435,8 @@ def parser() -> argparse.ArgumentParser:
     sim_validate.add_argument("--controller-log", required=True, type=Path)
     sim_validate.add_argument("--sim-log", required=True, type=Path)
     sim_validate.add_argument("--min-sim-time", type=float, default=1800.0)
+    sim_validate.add_argument("--min-command-delta", type=float, default=0.05)
+    sim_validate.add_argument("--min-joint-delta", type=float, default=0.05)
     sim_validate.add_argument("--report", type=Path)
     sim_validate.set_defaults(handler=command_sim_validate)
     kinect = commands.add_parser("kinect-preflight", help="run an explicit observe-only Kinect check")

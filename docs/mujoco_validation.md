@@ -98,3 +98,80 @@ without the dynamically feasible approach behavior learned by the controller.
 Training or fine-tuning must incorporate the bounded action parameterization
 and derivative-feasible margin so the policy learns to remain controllable
 inside it.
+
+## Dynamically feasible training action smoke — 2026-09-24
+
+The minimum training-side action term now uses the same stateful transform as
+deployment and asserts the resolved 29-joint order, nominal defaults, scales,
+and 20 ms control period. The feasible fine-tune config disables the existing
+joint-default randomization so it cannot silently invalidate that contract.
+Python/C++ transform parity and strict mismatch tests pass.
+
+The unchanged released checkpoint was then tested with
+`--dynamically-feasible-actions --no-hand-publish` on the required isolated
+production path. It entered CONTROL and responded to the replay, but was
+dynamically unstable: MuJoCo recorded 24 resets, maximum command displacement
+`2.5690` rad and maximum simulated joint displacement `2.6787` rad, with only
+`0.9` s maximum uninterrupted simulation time. The final guard stopped on a
+dynamically infeasible command. No Dex3 command was observed. This is a failed
+functional E2E, not soak evidence; see
+`artifacts/software/2026-09-24-feasible-policy/smoke-report.json`.
+
+Fine-tuning from `sonic_release/last.pt` is therefore required. The requested
+debug run was attempted with `sonic_release_feasible.yaml` and stopped before
+environment creation because Isaac Lab/Isaac Sim is not installed. The required
+motion datasets are also absent and this host has a 4 GiB RTX 3050 Laptop GPU.
+Move fine-tuning to a compatible Isaac Lab 2.3+ training machine, export the
+matching encoder/decoder/config, then restart this validation at the short
+smoke. Do not start the 1,800-second soak unless the smoke has zero resets and
+zero rejections while meeting the functional movement thresholds.
+
+## Stock SONIC baseline and Kinect replay comparison — 2026-09-24
+
+For the current input-baseline task, the preceding fine-tuning recommendation
+is superseded: no fine-tuning or experimental action transform was used. Both
+runs used the official matched release decoder, encoder and observation config,
+stock action scaling, isolated DDS domain 42/`lo`, floating-base MuJoCo, and
+`--no-hand-publish`. They did not touch physical Kinect or G1.
+
+- Model contract audit: training MJCF/URDF, stock simulator XML and both
+  deployment XMLs resolve the same 29 named body joints and limits. The
+  deployment `isaaclab_to_mujoco` permutation exactly maps the IsaacLab order
+  to SDK/MuJoCo order. The stock config is
+  `gear_sonic/utils/mujoco_sim/wbc_configs/g1_29dof_sonic_model12.yaml`, using
+  `gear_sonic/data/robot_model/model_data/g1/scene_43dof.xml` in PR mode. The
+  ankle ranges are model data, not locally invented values: left ankle pitch
+  `[-0.87267, 0.5236]`, right ankle roll `[-0.2618, 0.2618]`.
+- SONIC's own `reference/example/` input entered CONTROL and ran for 35.9
+  simulated seconds with zero reset/fall while the controller was active.
+  Maximum commanded displacement was `2.1028` rad, maximum measured joint
+  displacement `1.4144` rad and Dex3 command count zero.
+- The Kinect bridge replayed all 1,801 frames. SONIC entered streamed-motion
+  and SMPL mode with matching 994D policy and 1762D encoder observations. At
+  replay completion the simulator had run 60.6 simulated seconds with zero
+  reset/fall, maximum commanded displacement `2.4360` rad, maximum measured
+  joint displacement `1.5564` rad and Dex3 command count zero. A later fall
+  occurred only after the controller was manually terminated and is not part
+  of the active replay interval.
+- Each Kinect packet contains SMPL joints `[1,24,3]`, SMPL pose `[1,21,3]`, the
+  canonical 24-joint order, wxyz root orientation, meters in the root-local
+  SONIC frame, joint/velocity fields and monotonic frame/epoch/sequence/source
+  timing. The 30 Hz one-frame stream matches SONIC's checked-in live-camera
+  publisher. `StreamedMotionMerger` buffers those frames and gathers the
+  requested future window for the 50 Hz control loop, so no input-side
+  resampling was added.
+
+The discrepancy was the locally added strict desired-setpoint contract, not a
+stock model, map, policy or Kinect mismatch. Stock SONIC publishes PD setpoints
+and the official MuJoCo joints/actuators constrain the physical state; an
+out-of-range desired setpoint is not itself an out-of-range simulated joint.
+The extra `MotorSafety` contract is now observe-only only in `SONIC_SIM_ORT`,
+so it records discrepancies without changing the stock simulation command.
+It remains enforcing in non-simulator builds. Simulator raw-target rejection
+is likewise an explicit opt-in diagnostic; the default follows stock behavior.
+
+Result: the stock SONIC and Kinect-replay software baselines pass. No policy
+modification, resampling, training or long soak was required by this task. No
+physical Kinect or G1 validation was performed; the next step is Kinect-only
+Phase 9 acquisition and coordinate/calibration validation when hardware is
+available.

@@ -33,3 +33,16 @@ post-derivative-limit position escape, the experiment stopped safely on a
 dynamically infeasible right-knee command at 0.1 s. The unstable projection was
 removed; the stronger final guard and shared authoritative limit arrays remain.
 Do not reintroduce static post-policy projection as a gate workaround.
+
+Superseding stock-baseline evidence (2026-09-24): the official release artifacts,
+original action scaling and matching floating-base G1 MuJoCo model pass with
+SONIC's own reference (35.9 simulated seconds) and the deterministic Kinect
+replay (all 1,801 frames; 60.6 simulated seconds). Both active runs had zero
+reset/fall, clear body response and zero Dex3 commands. `MotorSafety` remains
+enforcing outside `SONIC_SIM_ORT`; in that isolated simulator build it audits
+the extra strict setpoint contract without changing stock commands. The stock
+MuJoCo model enforces the authoritative joint and actuator constraints. The
+30 Hz single-frame Kinect stream matches the existing SONIC live-camera
+contract; SONIC buffers it and constructs its future window internally. Do not
+enable `DynamicActionEnvelope`, retrain or fine-tune for this baseline. No
+physical Kinect/G1 validation occurred, and no hardware readiness gate passed.

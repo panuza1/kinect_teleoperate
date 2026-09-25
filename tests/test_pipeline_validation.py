@@ -65,11 +65,31 @@ class PipelineValidationTest(unittest.TestCase):
         controller = directory / "controller.log"
         simulator = directory / "sim.log"
         controller.write_text("transitioning to CONTROL state\n", encoding="utf-8")
-        simulator.write_text("[SONIC_SIM_METRICS] sim_time=1800.0s resets=0\n", encoding="utf-8")
+        simulator.write_text(
+            "[SONIC_SIM_METRICS] sim_time=1800.0s resets=0 "
+            "max_cmd_delta=0.2000rad max_joint_delta=0.1500rad hand_cmds=0\n",
+            encoding="utf-8",
+        )
         args = type("Args", (), {"controller_log": controller, "sim_log": simulator,
-                                  "min_sim_time": 1800.0, "report": None})
+                                  "min_sim_time": 1800.0, "min_command_delta": 0.05,
+                                  "min_joint_delta": 0.05, "report": None})
         self.assertEqual(validate_pipeline.command_sim_validate(args), 0)
         controller.write_text("transitioning to CONTROL state\n[MotorSafety] Rejected\n", encoding="utf-8")
+        self.assertEqual(validate_pipeline.command_sim_validate(args), 1)
+
+    def test_sim_validator_rejects_no_motion_or_hand_publication(self):
+        directory = Path(tempfile.mkdtemp())
+        controller = directory / "controller.log"
+        simulator = directory / "sim.log"
+        controller.write_text("transitioning to CONTROL state\n", encoding="utf-8")
+        simulator.write_text(
+            "[SONIC_SIM_METRICS] sim_time=60.0s resets=0 "
+            "max_cmd_delta=0.2000rad max_joint_delta=0.0000rad hand_cmds=1\n",
+            encoding="utf-8",
+        )
+        args = type("Args", (), {"controller_log": controller, "sim_log": simulator,
+                                  "min_sim_time": 30.0, "min_command_delta": 0.05,
+                                  "min_joint_delta": 0.05, "report": None})
         self.assertEqual(validate_pipeline.command_sim_validate(args), 1)
 
     def test_kinect_preflight_defaults_to_blocked_without_execution(self):

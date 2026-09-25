@@ -1,26 +1,21 @@
 # Current Kinect → SONIC → G1 work
 
-**Current gate (2026-09-24): `SOFTWARE_READY` is NOT READY.** Phases 2–7
-software components and their hardware-free unit/integration checks are
-implemented, including the SDK-neutral Kinect input boundary, persisted
-calibration/floor fit, bounded per-joint recovery, R2 replay, transport
-freshness, SONIC decoder hardening, named 29-joint safety, and diagnostics.
-The Phase 8 actual-component run correctly stopped when the production decoder
-generated an out-of-range ankle-pitch target after entering streamed SMPL mode
-(left target `0.885374` rad, model maximum `0.5236` rad). The matching official
-`sonic_v1_1` and `low_latency` checkpoint/config trios were also tested; both
-produced an illegal waist-pitch target. The training/deployment scale and
-normalization agree, but the released policy contract has no per-joint residual
-envelope compatible with the authoritative mechanical limits. A compatible or
-retrained checkpoint is required. The 30-minute soak was therefore not run and
-must not be claimed. See [MuJoCo validation](docs/mujoco_validation.md).
+**Current stock baseline (2026-09-24): PASS.** The official release
+checkpoint/encoder/decoder/observation config, original action scaling and
+matching floating-base G1 MuJoCo model ran for 35.9 simulated seconds with
+SONIC's own reference and no resets. The deterministic 1,801-frame Kinect
+replay then ran through the same stock path for 60.6 simulated seconds with no
+reset while replay was active. Both runs produced body motion and zero Dex3
+commands. No policy transform, retraining, physical Kinect or physical G1 was
+used. See [MuJoCo validation](docs/mujoco_validation.md).
 
-A static asymmetric residual projection was also evaluated as a new controller
-behavior. It caused repeated simulation safety resets; after strengthening the
-final guard to recheck position limits after derivative limiting, the same run
-stopped safely on a dynamically infeasible knee command. The experimental
-projection was removed. Retraining or fine-tuning with bounded,
-derivative-feasible actions remains required.
+The retained Kinect trace is 30 Hz. This matches SONIC's existing live-camera
+publisher contract: the controller buffers the one-frame messages and builds
+its own future window while its control loop runs at 50 Hz. No Kinect-side
+resampling is required for the stock baseline. `DynamicActionEnvelope` remains
+disabled. The additional `MotorSafety` guard remains enforcing for non-simulator
+builds and is observe-only in the isolated stock-policy simulator build, where
+MuJoCo uses the official joint and actuator constraints.
 
 The supported end-to-end implementation route is documented in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). It extends
