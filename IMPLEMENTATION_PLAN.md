@@ -1019,3 +1019,57 @@ with 6.4 Hz on CPU, and the live profile now uses the existing CUDA provider.
 A subsequent 15-second hardware run had no person in view (238 frames, zero
 bodies), so no `bridge_fps` or `zmq_fps` pass is claimed. No MuJoCo, SONIC,
 GR00T, policy or G1 path was used.
+
+## Kinect → stock SONIC simulation validation — 2026-10-01
+
+**Classification:** `SOFTWARE_ONLY` replay validation using the already-passed
+Kinect capture evidence; no physical G1 endpoint was opened. The latest valid
+Femto Bolt trace contains 439/439 body frames and reports Kinect, tracking and
+bridge rates of 29.2496 Hz with valid SMPL output. A later camera probe found no
+person, so the existing deterministic five-motion trace was used as allowed by
+the task.
+
+No bridge compatibility change was required. A captured wire packet is SONIC
+Protocol v3 with `smpl_joints [1,24,3]`, `smpl_pose [1,21,3]`, zero-valued
+29-DoF joint compatibility fields, wxyz `body_quat`, and `frame_index`. The
+replay published 1,740 pose packets in 57.9681 seconds (29.9993 Hz). SONIC
+loaded the released default decoder, encoder and observation config, entered
+CONTROL, enabled ZMQ streaming, and selected `smpl` encode mode 2. Artifact
+hashes remain encoder
+`013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3`,
+decoder
+`c7241a123eaa36b5d64bad19540efde93cac1ad443bd4572fd12ca99898118ed`,
+observation config
+`466d05947c78af6c76388adfb86e3a2a77b2a1d921a64883ed3d085ebf58de1b`,
+and G1 policy checkpoint
+`e6bdab3f64a39336b3d41877d4f497d05f58af275f288ec0e6746c283ded8909`.
+
+The checked-in direct live ZMQ runtime is the official MuJoCo sim2sim path.
+Isaac Lab in this repository is used by training/evaluation and has no direct
+live ZMQ runtime adapter; Isaac Lab/Isaac Sim is also absent on this host. The
+direct `--input-type zmq` run therefore used the stock floating-base MuJoCo G1,
+DDS domain 42 on `lo`, and `--no-hand-publish`. It stayed in SMPL mode for the
+replay, completed all 1,801 trace frames, observed 1,740 pose packets and 2,974
+G1 debug samples, and had zero active-run resets and zero hand commands.
+Measured response was directionally correct: left raise left-arm delta 1.5496
+rad versus right 0.8141; right raise right-arm delta 1.5395 versus left 0.7519;
+both raise left/right deltas 1.6472/1.6307; torso rotation base-yaw range 0.2230
+rad. The post-replay ZMQ timeout safely disabled streaming and is expected when
+the finite publisher exits.
+
+Evidence is under `artifacts/software/2026-10-01-kinect-sonic-live/`:
+`protocol-v3.json` SHA-256
+`397e0aaef3a473d9cbeda6cfc9075675f05f840d192e8b9fcc772528db47d5b4`,
+`zmq-rate.json`
+`2e5ea2ced7eaebba4e6492fcb79e036a3705f7cab984d3d8381b6e7eca600133`,
+`motion-response-direct.json`
+`16f450feba38907360f3a2eb41d68a382ec51e2209c26d3149f6ad360348c36f`,
+controller log
+`34f8b0cd3a9e023d3879905f0294c9b3e07881ba33d2227e86f0b8acb5337f02`,
+simulator log
+`233c41c2b35cdb1519ba4ad75f6f370cfdafabc426f2461d468cde642b486a6b`,
+and five-motion trace
+`1aef7295381e32b36fb58626b2bf573c69ee22a9140bf9b97db1f6dd0c7a5fb5`.
+No SONIC,
+policy, bridge, retargeting, SMPL, ZMQ, Isaac Lab, hand, or real-G1 code was
+changed. This scoped Kinect → stock SONIC → G1 simulation validation passes.

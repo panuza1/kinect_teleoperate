@@ -3,7 +3,7 @@
   "mode": "sim",
   "no_publish": false,
   "debug_skeleton": false,
-  "cpu": true,
+  "cpu": false,
   "port": 5556,
   "bind_host": "127.0.0.1",
   "model_path": "",

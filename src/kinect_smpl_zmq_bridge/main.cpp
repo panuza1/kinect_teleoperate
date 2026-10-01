@@ -77,6 +77,7 @@ Options parse(int argc, char** argv) {
     options.cpu = options.cpu || options.bridge_config.cpu;
     options.debug_skeleton = options.debug_skeleton || options.bridge_config.debug_skeleton;
     if (options.model.empty()) options.model = options.bridge_config.model_path;
+    options.bridge_config.model_path = options.model;
     if (options.publish && !options.bridge_config.may_publish())
         throw std::runtime_error("publishing requires an isolated sim configuration with no_publish=false");
     if (options.arm && !options.publish) throw std::runtime_error("--arm requires --publish");
