@@ -21,8 +21,9 @@ target_include_directories(window_controller_3d PRIVATE ../../sample_helper_incl
 target_include_directories(window_controller_3d PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Dependencies of this library
-target_link_libraries(window_controller_3d PRIVATE 
+target_link_libraries(window_controller_3d PRIVATE
     glfw::glfw
+    k4abt::k4abt
     )
 
 add_library(window_controller_3d::window_controller_3d ALIAS window_controller_3d)

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 enum class BridgeState : std::uint8_t {
@@ -23,6 +24,7 @@ struct BridgeResult {
     std::uint64_t epoch = 0;
     std::uint64_t sequence = 0;
     std::uint64_t source_timestamp_us = 0;
+    std::string rejection_reason;
 };
 
 struct SessionHealth {
@@ -46,7 +48,7 @@ public:
     SessionHealth health() const;
 
 private:
-    BridgeResult fallback(BridgeState state, std::uint64_t now_us);
+    BridgeResult fallback(BridgeState state, std::uint64_t now_us, std::string reason = {});
     void reset_calibration();
 
     std::unique_ptr<SkeletonToSmpl> converter_ = std::make_unique<SkeletonToSmpl>(0.75f, false);

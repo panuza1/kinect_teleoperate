@@ -92,7 +92,8 @@ void print_skeleton(const SkeletonSample& sample, const BridgeResult& result) {
         JOINT_SHOULDER_LEFT, JOINT_ELBOW_LEFT, JOINT_WRIST_LEFT,
         JOINT_SHOULDER_RIGHT, JOINT_ELBOW_RIGHT, JOINT_WRIST_RIGHT,
         JOINT_HIP_LEFT, JOINT_KNEE_LEFT, JOINT_ANKLE_LEFT,
-        JOINT_HIP_RIGHT, JOINT_KNEE_RIGHT, JOINT_ANKLE_RIGHT
+        JOINT_FOOT_LEFT, JOINT_HIP_RIGHT, JOINT_KNEE_RIGHT,
+        JOINT_ANKLE_RIGHT, JOINT_FOOT_RIGHT
     };
     std::cout << "state=" << state_name(result.state) << " body=" << sample.body_id
               << " device_us=" << sample.device_timestamp_us << '\n';
@@ -245,6 +246,8 @@ void live(const Options& options) {
             std::cout << "bridge_state=" << state_name(result.state) << '\n';
             last_state = result.state;
         }
+        if (options.debug_skeleton && !result.rejection_reason.empty())
+            std::cout << "reject_reason=" << result.rejection_reason << '\n';
         if (options.debug_skeleton && frame.bodies.size() == 1 && index % 30 == 0)
             print_skeleton(frame.bodies.front(), result);
         if (publisher && result.publish) {

@@ -19,6 +19,7 @@ option(KINECT_ENABLE_HARDWARE "Build Azure Kinect acquisition support" ON)
 if (KINECT_ENABLE_HARDWARE)
     find_package(k4a REQUIRED)
     find_package(k4abt REQUIRED)
+    find_library(K4ARECORD_LIBRARY k4arecord REQUIRED)
 endif()
 
 # These specific settings tell the loader to search the directory of the

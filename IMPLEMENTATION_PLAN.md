@@ -694,7 +694,7 @@ Reuse existing binaries/modules. The commands below are **future planned interfa
 
 | Tool / phase and classification | Purpose and inputs | Outputs | Planned CLI | Pass / fail |
 |---|---|---|---|---|
-| Kinect preflight / P2 software implementation, P9 KINECT_HARDWARE_REQUIRED execution | SDK prefix, config, serial, USB and model/provider | Device/SDK/stream/provider report | Offline/blocking check: `python3 scripts/validate_pipeline.py kinect-preflight --config config/teleop.json --report artifacts/kinect.json`; only after SOFTWARE_READY, physical execution adds `--bridge /tmp/kinect-p2-hw/kinect_smpl_zmq_bridge --duration 600 --trace artifacts/kinect/phase9.trace --execute` | PASS only real open/stream checks satisfy H01; without `--execute` or without a device BLOCKED; missing/incompatible component FAIL |
+| Kinect preflight / P2 software implementation, P9 KINECT_HARDWARE_REQUIRED execution | SDK prefix, config, serial, USB and model/provider | Device/SDK/stream/provider report | Offline/blocking check: `python3 scripts/validate_pipeline.py kinect-preflight --config config/teleop.json --report artifacts/kinect.json`; only after SOFTWARE_READY, physical execution adds `--bridge build/kinect_smpl_zmq_bridge --duration 600 --trace artifacts/kinect/phase9.trace --execute` | PASS only real open/stream checks satisfy H01; without `--execute` or without a device BLOCKED; missing/incompatible component FAIL |
 | RGB/depth viewer / P9 KINECT_HARDWARE_REQUIRED | Physical camera; existing SDK `k4aviewer` and configured stream settings | Synchronized image display + linked capture metadata from preflight | Existing `$KINECT_SDK_PREFIX/bin/k4aviewer`; then `$BRIDGE --config config/teleop.json --mode observe --view rgb-depth --record artifacts/streams.trace` | H01 stream timestamps/drops pass; missing/skewed image FAIL; viewer alone not PASS |
 | Live skeleton viewer / P7 SOFTWARE_ONLY tool, P9 live execution | FrameEnvelope/confidence/ID/calibration | 3D labeled raw/normalized bones, selected ID and ages | `$BRIDGE --config config/teleop.json --mode observe --view skeleton` | Same selected coordinates as logs, no publisher; missing axes/selection overlay or blocking UI FAIL |
 | Calibration / P3 SOFTWARE_ONLY, P10 measurement | Depth ROI, serial, neutral skeleton, known scale/heading | Versioned artifact, residual report | `$BRIDGE --config config/teleop.json --mode observe --calibrate all --calibration-out artifacts/calibration.json` | U05/H02 tolerances and all metadata; invalid fit/serial FAIL |
@@ -939,3 +939,83 @@ resampling or long soak is required for its acceptance. The minimum next step
 is Phase 9 Kinect-only acquisition, reconnect and physical coordinate/
 calibration validation when hardware is available. No Kinect or G1 hardware
 gate is represented here as passed.
+
+## Phase 9 preflight attempt — 2026-10-01
+
+**Classification:** `KINECT_HARDWARE_REQUIRED`. The stale `/tmp` executable
+was absent, so the existing CMake target was built at
+`build/kinect_smpl_zmq_bridge` with `KINECT_ENABLE_HARDWARE=ON`. The initial
+build linked Microsoft's K4A runtime and the 20-second observe/no-publish
+validator exited 1: `Azure Kinect DK not detected`, despite USB enumeration of
+Femto Bolt `2bc5:066b`. The repo-local executable was then rebuilt against
+Orbbec K4A Wrapper v2.0.12, preserving the bridge's K4A API and Microsoft body
+tracking runtime. `ldd` confirms the Orbbec `libk4a.so.1.4` and `libOrbbecSDK`
+are loaded (bridge SHA-256
+`46395fe3c9ddbbef8cd7ee67a5ff66f60a196322bd39e5dd5ee9b1c0607994c8`). The
+retry is blocked: `/dev/bus/usb/002/002` is `root:root` mode
+0664 and inaccessible to the current user; applying the official udev rule
+requires sudo, which is unavailable non-interactively. The wrapper smoke also
+exited 1 with `Azure Kinect DK not detected`; report
+`artifacts/kinect/phase9-wrapper-smoke.json`, SHA-256
+`8e2b5703c44d40731af4509fdf090992e0c2e3214907bc6dfb39995e3dc87162`;
+trace is empty. USB topology reports 5000M. Python 3.14.6 successfully ran the
+validator and is not the blocker. No DDS/G1 command was sent. Phase 9 remains
+incomplete and no KINECT_READY gate passed. Next: install the Orbbec udev
+rules, reconnect the Femto Bolt, verify user read/write access, rerun the
+10-second smoke, then perform the 600-second preflight and remaining Phase 9
+checks.
+
+The validator lifecycle fix is `SOFTWARE_ONLY`; its focused lifecycle tests
+pass 5/5 (graceful SIGTERM, early bridge error, SDK error output, missing body
+data, and SIGKILL fallback). The current Phase 9 `KINECT_HARDWARE_REQUIRED`
+smoke reached K4ABT initialization but failed because `config/teleop.json`
+leaves `model_path` empty: the runtime searched the working directory and
+`/usr/bin` for `dnn_model_2_0_op11.onnx`, while the installed model is under
+the Azure Kinect SDK `bin/` directory. The startup did not exit after SIGTERM
+within 3 s, so the validator reported failure and used SIGKILL; no trace was
+produced. Report `artifacts/kinect/phase9-smoke.json`, SHA-256
+`410b993c90c5c160660dbc068bbcc791d76976f5f1ae3368c83ee470a0f61fcc`. No
+hardware command was sent and KINECT_READY remains unpassed.
+
+The follow-up used the installed full model at
+`/home/panu/.local/share/azure-kinect/1.4.1-1.1.2/usr/bin/dnn_model_2_0_op11.onnx`
+(SHA-256 `40bf149c8e3dc4cba34cff4f5c3db6f5d5d4e6559d525df1aa02c2e6c80f7d2d`).
+The Femto Bolt and body tracker both started, the bridge ran for the requested
+20 seconds and exited cleanly on SIGTERM, and the R2 trace contained 176 valid
+frames. It contained zero body frames, so the preflight correctly failed with
+`no valid body data observed`; report SHA-256
+`42a684f831431dbb699853b76077ac663470b580db8e1bc09771fe0400545d05`.
+The existing fixed-base `kinect_teleoperate` MuJoCo target was also built
+against the Orbbec K4A wrapper and opened both Kinect and G1 render windows
+with `Real_Control=false`. The Kinect window remained empty and the simulated
+G1 remained neutral, so neutral/left-arm/right-arm/both-arms/torso motion
+evidence was not obtained. No real G1 or SONIC/GR00T path was used.
+
+### Phase 9 confidence-gate diagnosis — 2026-10-01
+
+**Classification:** `KINECT_HARDWARE_REQUIRED`. The operator's 220-frame live
+trace (109 body frames, SHA-256
+`0605deb6c52053c1b4603cff1473041e15f180bb2369beba3434a89d636e25f4`)
+was decoded at the raw-joint boundary. Of 109 bodies, right foot confidence
+was LOW in 97 frames; the previous gate required MEDIUM for both feet and
+therefore rejected 98 frames. The failure sets were: right foot only 72;
+left hip/ankle/foot plus right foot 21; both hip/ankle/foot chains 4; left
+hip/ankle/foot only 1. All pelvis, chest, head and shoulder samples were
+MEDIUM. The installed K4ABT header defines LOW as a predicted occluded joint,
+NONE as out of range, and MEDIUM as the highest level emitted by this SDK.
+
+The gate now accepts LOW for the two foot endpoints while retaining MEDIUM
+for pelvis, chest, head, shoulders, hips and ankles. NONE, nonfinite data,
+invalid orientations, stale lower-body history and the existing conversion
+checks still reject. `--debug-skeleton` now reports the exact joint,
+confidence requirement and missing/stale fresh-history age for every
+LOW_CONFIDENCE rejection. A focused session regression passes. Reprocessing
+the captured raw trace reaches CALIBRATING on 83 frames instead of rejecting
+them at the foot gate. It does not finish calibration because the operator's
+right hand was NONE in 107/109 body frames (81/83 calibration candidates), so
+valid live SMPL/ZMQ output still requires a new full-body capture with both
+hands and feet visible. GPU tracking was verified at about 25 Hz, compared
+with 6.4 Hz on CPU, and the live profile now uses the existing CUDA provider.
+A subsequent 15-second hardware run had no person in view (238 frames, zero
+bodies), so no `bridge_fps` or `zmq_fps` pass is claimed. No MuJoCo, SONIC,
+GR00T, policy or G1 path was used.

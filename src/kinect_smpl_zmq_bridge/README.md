@@ -22,19 +22,22 @@ Build (no hardware access):
 ```bash
 cd /home/panu/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
 sdk_root=/home/panu/.local/share/azure-kinect/1.4.1-1.1.2/usr
-cmake -S . -B /tmp/kinect-bridge-build -DKINECT_BRIDGE_ONLY=ON \
-  -DCMAKE_PREFIX_PATH="$sdk_root" -DZMQ_INCLUDE_DIR="$sdk_root/include" \
+wrapper_root="$PWD/build/orbbec-wrapper/package"
+cmake -S . -B build -DKINECT_BRIDGE_ONLY=ON -DKINECT_ENABLE_HARDWARE=ON \
+  -DCMAKE_PREFIX_PATH="$wrapper_root;$sdk_root" -Dk4a_DIR="$wrapper_root/lib/cmake/k4a" \
+  -DZMQ_INCLUDE_DIR="$sdk_root/include" \
   -DZMQ_LIBRARY=/usr/lib/x86_64-linux-gnu/libzmq.so.5
-cmake --build /tmp/kinect-bridge-build -j2
-/tmp/kinect-bridge-build/kinect_bridge_session_test
+cmake --build build -j2
+build/kinect_bridge_session_test
 ```
 
 Live skeleton check, without SONIC publishing:
 
 ```bash
 sdk_root=/home/panu/.local/share/azure-kinect/1.4.1-1.1.2/usr
-LD_LIBRARY_PATH="$sdk_root/lib:$sdk_root/lib/x86_64-linux-gnu" \
-  /tmp/kinect-bridge-build/kinect_smpl_zmq_bridge --debug-skeleton --cpu \
+wrapper_root="$PWD/build/orbbec-wrapper/package"
+LD_LIBRARY_PATH="$wrapper_root/lib:$sdk_root/lib:$sdk_root/lib/x86_64-linux-gnu" \
+  build/kinect_smpl_zmq_bridge --debug-skeleton --cpu \
   --model "$sdk_root/bin/dnn_model_2_0_lite_op11.onnx"
 ```
 
@@ -62,8 +65,9 @@ Start the live bridge in a third terminal:
 
 ```bash
 sdk_root=/home/panu/.local/share/azure-kinect/1.4.1-1.1.2/usr
-LD_LIBRARY_PATH="$sdk_root/lib:$sdk_root/lib/x86_64-linux-gnu" \
-  /tmp/kinect-bridge-build/kinect_smpl_zmq_bridge --cpu \
+wrapper_root="$PWD/build/orbbec-wrapper/package"
+LD_LIBRARY_PATH="$wrapper_root/lib:$sdk_root/lib:$sdk_root/lib/x86_64-linux-gnu" \
+  build/kinect_smpl_zmq_bridge --cpu \
   --model "$sdk_root/bin/dnn_model_2_0_lite_op11.onnx" \
   --record /tmp/kinect_live.trace
 ```
@@ -73,15 +77,16 @@ bridge in the third terminal):
 
 ```bash
 sdk_root=/home/panu/.local/share/azure-kinect/1.4.1-1.1.2/usr
-LD_LIBRARY_PATH="$sdk_root/lib:$sdk_root/lib/x86_64-linux-gnu" \
-  /tmp/kinect-bridge-build/kinect_smpl_zmq_bridge --replay /tmp/kinect_live.trace
+wrapper_root="$PWD/build/orbbec-wrapper/package"
+LD_LIBRARY_PATH="$wrapper_root/lib:$sdk_root/lib:$sdk_root/lib/x86_64-linux-gnu" \
+  build/kinect_smpl_zmq_bridge --replay /tmp/kinect_live.trace
 ```
 
 The trace stores device and host timestamps, body ID, raw 32-joint skeleton
 (positions, orientations, confidence), calibrated SMPL output, planner intent,
 and tracking state. Replay recalculates the output and rejects divergence. A
 hardware-free 60-second trace can be created with
-`/tmp/kinect-bridge-build/kinect_bridge_session_test /tmp/kinect_sim_replay.trace`.
+`build/kinect_bridge_session_test /tmp/kinect_sim_replay.trace`.
 
 The metrics line reports Kinect capture FPS, Body Tracking FPS, bridge FPS,
 ZMQ FPS, capture-to-publish latency, and an estimated capture-to-sim latency

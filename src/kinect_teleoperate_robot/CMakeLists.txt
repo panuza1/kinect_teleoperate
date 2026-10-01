@@ -27,9 +27,9 @@ target_include_directories(kinect_teleoperate
 
 # Dependencies of this library
 target_link_libraries(kinect_teleoperate PRIVATE 
-    k4a
-    k4abt
-    k4arecord
+    k4a::k4a
+    k4abt::k4abt
+    ${K4ARECORD_LIBRARY}
     window_controller_3d::window_controller_3d
     glfw::glfw
     ${MuJoCo_Libraries}

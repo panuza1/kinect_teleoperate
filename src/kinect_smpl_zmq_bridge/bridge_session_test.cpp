@@ -101,6 +101,17 @@ int main(int argc, char** argv) {
     const float left_neutral = joint_z(result, 20);
     const float right_neutral = joint_z(result, 21);
 
+    sample.skeleton.joints[JOINT_FOOT_RIGHT].confidence_level = CONFIDENCE_LOW;
+    for (int i = 0; i < 4; ++i) result = step();
+    assert(result.state == BridgeState::TRACKING && result.publish);
+    sample.skeleton.joints[JOINT_FOOT_RIGHT].confidence_level = CONFIDENCE_NONE;
+    for (int i = 0; i < 4; ++i) result = step();
+    assert(result.state == BridgeState::LOW_CONFIDENCE &&
+           result.rejection_reason.find("FOOT_RIGHT") != std::string::npos);
+    sample.skeleton.joints[JOINT_FOOT_RIGHT].confidence_level = CONFIDENCE_HIGH;
+    result = step();
+    assert(result.state == BridgeState::TRACKING && result.publish);
+
     sample.skeleton.joints[JOINT_WRIST_LEFT].position.xyz.y -= 250;
     for (int i = 0; i < 20; ++i) result = step();
     assert(joint_z(result, 20) > left_neutral + 0.20f);

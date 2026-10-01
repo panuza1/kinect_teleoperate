@@ -16,12 +16,22 @@ passes, use a hardware-capable bridge build and run:
 ```bash
 python3 scripts/validate_pipeline.py kinect-preflight \
   --config config/teleop.json \
-  --bridge /tmp/kinect-p2-hw/kinect_smpl_zmq_bridge \
+  --bridge build/kinect_smpl_zmq_bridge \
   --duration 600 \
   --trace artifacts/kinect/phase9.trace \
   --report artifacts/kinect/phase9-preflight.json \
   --execute
 ```
+
+For an Orbbec Femto Bolt, the Microsoft `libk4a` runtime does not enumerate
+USB ID `2bc5:066b`. Use Orbbec's K4A Wrapper runtime with the existing bridge
+and the Microsoft Body Tracking runtime. The Orbbec release package must be
+on the bridge's RPATH/`LD_LIBRARY_PATH`, and its `99-obsensor-libusb.rules`
+must be installed before reconnecting the camera. Install it with
+`sudo ./build/orbbec-wrapper/package/scripts/install_udev_rules.sh`, then
+reconnect the camera. Confirm the USB node is readable by the user running
+the preflight. The local build uses the Orbbec K4A Wrapper v2.0.12 package at
+`build/orbbec-wrapper/package` ([official release](https://github.com/orbbec/OrbbecSDK-K4A-Wrapper/releases/tag/v2.0.12)).
 
 For real validation, record the Kinect serial, USB topology, SDK/model hash,
 G1 variant/firmware, controller build hash, network interface, current vendor

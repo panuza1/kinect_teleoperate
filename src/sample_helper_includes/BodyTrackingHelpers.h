@@ -5,6 +5,7 @@
 
 #include <array>
 #include <unordered_map>
+#include <string>
 #include <k4abttypes.h>
 
 // Define the bone list based on the documentation

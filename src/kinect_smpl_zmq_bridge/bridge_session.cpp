@@ -5,34 +5,74 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 
 namespace {
 constexpr char kTraceMagicR1[8] = {'K', 'S', 'M', 'P', 'L', 'R', '1', '\n'};
 constexpr char kTraceMagicR2[8] = {'K', 'S', 'M', 'P', 'L', 'R', '2', '\n'};
-constexpr std::array<JointId, 11> kCritical = {
-    JOINT_PELVIS, JOINT_SPINE_CHEST, JOINT_HEAD,
-    JOINT_SHOULDER_LEFT, JOINT_SHOULDER_RIGHT,
-    JOINT_HIP_LEFT, JOINT_HIP_RIGHT,
-    JOINT_ANKLE_LEFT, JOINT_ANKLE_RIGHT,
-    JOINT_FOOT_LEFT, JOINT_FOOT_RIGHT
+struct RequiredJoint {
+    JointId id;
+    JointConfidence minimum;
 };
 
-bool reliable(const BodySkeleton& skeleton) {
-    for (const auto id : kCritical) {
-        const auto& j = skeleton.joints[id];
-        if (j.confidence_level < CONFIDENCE_MEDIUM ||
-            !std::isfinite(j.position.xyz.x) || !std::isfinite(j.position.xyz.y) ||
-            !std::isfinite(j.position.xyz.z) ||
-            !std::isfinite(j.orientation.wxyz.w) || !std::isfinite(j.orientation.wxyz.x) ||
-            !std::isfinite(j.orientation.wxyz.y) || !std::isfinite(j.orientation.wxyz.z) ||
-            j.orientation.wxyz.w * j.orientation.wxyz.w +
-            j.orientation.wxyz.x * j.orientation.wxyz.x +
-            j.orientation.wxyz.y * j.orientation.wxyz.y +
-            j.orientation.wxyz.z * j.orientation.wxyz.z < 1e-8f) return false;
+constexpr std::array<RequiredJoint, 11> kRequired = {{
+    {JOINT_PELVIS, CONFIDENCE_MEDIUM}, {JOINT_SPINE_CHEST, CONFIDENCE_MEDIUM},
+    {JOINT_HEAD, CONFIDENCE_MEDIUM}, {JOINT_SHOULDER_LEFT, CONFIDENCE_MEDIUM},
+    {JOINT_SHOULDER_RIGHT, CONFIDENCE_MEDIUM}, {JOINT_HIP_LEFT, CONFIDENCE_MEDIUM},
+    {JOINT_HIP_RIGHT, CONFIDENCE_MEDIUM}, {JOINT_ANKLE_LEFT, CONFIDENCE_MEDIUM},
+    {JOINT_ANKLE_RIGHT, CONFIDENCE_MEDIUM}, {JOINT_FOOT_LEFT, CONFIDENCE_LOW},
+    {JOINT_FOOT_RIGHT, CONFIDENCE_LOW}
+}};
+
+constexpr std::array<const char*, JOINT_COUNT> kJointNames = {
+    "PELVIS", "SPINE_NAVEL", "SPINE_CHEST", "NECK", "CLAVICLE_LEFT", "SHOULDER_LEFT",
+    "ELBOW_LEFT", "WRIST_LEFT", "HAND_LEFT", "HANDTIP_LEFT", "THUMB_LEFT", "CLAVICLE_RIGHT",
+    "SHOULDER_RIGHT", "ELBOW_RIGHT", "WRIST_RIGHT", "HAND_RIGHT", "HANDTIP_RIGHT", "THUMB_RIGHT",
+    "HIP_LEFT", "KNEE_LEFT", "ANKLE_LEFT", "FOOT_LEFT", "HIP_RIGHT", "KNEE_RIGHT",
+    "ANKLE_RIGHT", "FOOT_RIGHT", "HEAD", "NOSE", "EYE_LEFT", "EAR_LEFT", "EYE_RIGHT", "EAR_RIGHT"
+};
+
+const char* confidence_name(JointConfidence confidence) {
+    constexpr const char* names[] = {"NONE", "LOW", "MEDIUM", "HIGH"};
+    return confidence <= CONFIDENCE_HIGH ? names[confidence] : "INVALID";
+}
+
+std::string reliability_failure(const BodySkeleton& skeleton,
+                                const std::array<std::uint64_t, JOINT_COUNT>& last_fresh_us,
+                                std::uint64_t now_us, std::uint64_t hold_us) {
+    std::ostringstream reason;
+    for (const auto& required : kRequired) {
+        const auto& j = skeleton.joints[required.id];
+        std::string failure;
+        if (j.confidence_level < required.minimum) {
+            failure = "confidence=" + std::string(confidence_name(j.confidence_level)) +
+                " required=" + confidence_name(required.minimum);
+            const auto fresh_us = last_fresh_us[required.id];
+            if (!fresh_us) failure += " fresh=missing";
+            else {
+                const auto age_us = now_us >= fresh_us ? now_us - fresh_us : 0;
+                failure += " fresh_age_us=" + std::to_string(age_us);
+                if (age_us > hold_us) failure += " stale=true";
+            }
+        } else if (!std::isfinite(j.position.xyz.x) || !std::isfinite(j.position.xyz.y) ||
+                   !std::isfinite(j.position.xyz.z)) failure = "position=nonfinite";
+        else if (!std::isfinite(j.orientation.wxyz.w) || !std::isfinite(j.orientation.wxyz.x) ||
+                 !std::isfinite(j.orientation.wxyz.y) || !std::isfinite(j.orientation.wxyz.z))
+            failure = "orientation=nonfinite";
+        else if (j.orientation.wxyz.w * j.orientation.wxyz.w +
+                 j.orientation.wxyz.x * j.orientation.wxyz.x +
+                 j.orientation.wxyz.y * j.orientation.wxyz.y +
+                 j.orientation.wxyz.z * j.orientation.wxyz.z < 1e-8f)
+            failure = "orientation=invalid";
+        if (!failure.empty()) {
+            if (reason.tellp() > 0) reason << "; ";
+            reason << "joint=" << kJointNames[required.id] << ' ' << failure;
+        }
     }
-    return true;
+    return reason.str();
 }
 
 bool fresh_joint(const JointSample& joint) {
@@ -248,9 +288,10 @@ void BridgeSession::reset_calibration() {
     } else if (calibration_required_) throw std::runtime_error("required calibration file not found");
 }
 
-BridgeResult BridgeSession::fallback(BridgeState state, std::uint64_t now_us) {
+BridgeResult BridgeSession::fallback(BridgeState state, std::uint64_t now_us, std::string reason) {
     BridgeResult out;
     out.state = state;
+    out.rejection_reason = std::move(reason);
     out.epoch = epoch_;
     out.sequence = sequence_++;
     if (have_neutral_) {
@@ -320,9 +361,11 @@ BridgeResult BridgeSession::process(const std::optional<SkeletonSample>& sample,
             accepted.skeleton.joints[i] = candidate_joint[i];
         }
     }
-    if (!reliable(accepted.skeleton)) {
+    const auto reliability_error = reliability_failure(
+        accepted.skeleton, candidate_joint_us, now_us, joint_hold_us_);
+    if (!reliability_error.empty()) {
         if (last_valid_us_ && now_us > last_valid_us_ + tracking_stop_us_) reset_calibration();
-        return fallback(BridgeState::LOW_CONFIDENCE, now_us);
+        return fallback(BridgeState::LOW_CONFIDENCE, now_us, reliability_error);
     }
 
     if (!calibrated_) {
@@ -352,13 +395,15 @@ BridgeResult BridgeSession::process(const std::optional<SkeletonSample>& sample,
     const auto pelvis = accepted.skeleton.joints[JOINT_PELVIS].position;
     if (previous_pelvis_ && last_valid_us_ && now_us > last_valid_us_ &&
         now_us - last_valid_us_ < 100000 && distance_mm(pelvis, *previous_pelvis_) > 200.0f)
-        return fallback(BridgeState::LOW_CONFIDENCE, now_us);
+        return fallback(BridgeState::LOW_CONFIDENCE, now_us, "pelvis jump exceeds 200 mm");
     const float dt = previous_device_us_ && accepted.device_timestamp_us > previous_device_us_
         ? static_cast<float>(accepted.device_timestamp_us - previous_device_us_) / 1e6f : 1.0f / 30.0f;
     previous_device_us_ = accepted.device_timestamp_us;
     SonicPoseFrame pose;
-    if (!converter_->convert(accepted.skeleton, frame_index_++, std::clamp(dt, 0.01f, 0.2f), pose) ||
-        !finite_pose(pose)) return fallback(BridgeState::LOW_CONFIDENCE, now_us);
+    if (!converter_->convert(accepted.skeleton, frame_index_++, std::clamp(dt, 0.01f, 0.2f), pose))
+        return fallback(BridgeState::LOW_CONFIDENCE, now_us, "SMPL conversion rejected skeleton");
+    if (!finite_pose(pose))
+        return fallback(BridgeState::LOW_CONFIDENCE, now_us, "SMPL conversion produced invalid pose");
     last_joint_ = candidate_joint;
     last_joint_us_ = candidate_joint_us;
     pose.velocity_mps[0] = std::clamp(pose.velocity_mps[0], -max_forward_mps_, max_forward_mps_);

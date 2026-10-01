@@ -13,6 +13,7 @@
 #include <thread>
 #include <mutex>
 #include <array>
+#include <atomic>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -32,6 +33,8 @@
 using namespace std::chrono;
 
 bool s_isRunning = true;
+std::atomic_bool s_kinectReady{false};
+std::atomic_bool s_kinectRenderReady{false};
 
 #define Control_G1 true
 #define Control_H1 false
@@ -214,6 +217,7 @@ void KinectRender_loop(k4a_calibration_t sensorCalibration) {
     std::cout<<"Please use the wake-up action to start or stop the TeleOperation..."<<std::endl;
     Window3dWrapper kinectRenderWindow;
     kinectRenderWindow.Create("Kinect Render", sensorCalibration);
+    s_kinectRenderReady = true;
     kinectRenderWindow.SetCloseCallback(CloseCallback);
     kinectRenderWindow.SetKeyCallback(ProcessKey);
     int depthWidth = sensorCalibration.depth_camera_calibration.resolution_width;
@@ -635,6 +639,7 @@ void Main_loop(){
     VERIFY(k4abt_tracker_create(&sensorCalibration, trackerConfig, &tracker), "Body tracker initialization failed!");
     // Do not use Kinect's built-in smoothing
     k4abt_tracker_set_temporal_smoothing(tracker, 0.0);
+    s_kinectReady = true;
 
     std::thread KinectRender_thread(KinectRender_loop, sensorCalibration);
 
@@ -713,11 +718,13 @@ int main(int argc, char** argv)
     d = mj_makeData(m);
     mj_resetData(m, d);
 
+    std::thread kinect_thread(Main_loop);
+    while (!s_kinectReady || !s_kinectRenderReady)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     std::thread control_thread(Control_loop);
     std::thread mujocoRender_thread(MujocoRender_loop);
 
-    Main_loop();
-
+    kinect_thread.join();
     control_thread.join();
     mujocoRender_thread.join();
 
