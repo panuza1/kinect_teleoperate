@@ -2,13 +2,15 @@
 
 The binding path for the current task is:
 
-`Femto Bolt/Kinect -> K4A/K4ABT GPU tracking -> KinectToG1Retargeter -> G1 qpos/qvel[29] -> either fixed-base MuJoCo debug or SONIC Protocol v1 -> released SONIC policy -> floating-base MuJoCo`.
+`Femto Bolt/Kinect -> K4A/K4ABT GPU tracking -> KinectToGMRAdapter -> official GMR Unitree G1 IK -> G1 qpos/qvel[29] -> either fixed-base MuJoCo debug or SONIC Protocol v1 -> released SONIC policy -> floating-base MuJoCo`.
 
 These rules supersede older SMPL/v3 recommendations later in this file for
 this path:
 
 - Read `PLAN.md`, `IMPLEMENTATION_PLAN.md`, and `docs/full_body_architecture.md` first.
 - Preserve the existing Kinect acquisition/rendering pipeline and helpers.
+- Use the sibling official `GMR/` checkout as a dependency; do not copy or reimplement its IK.
+- `--retargeter gmr` is primary. Keep `--retargeter legacy` diagnostic-only.
 - Keep `Control_G1=true`, `Real_Control=false`, `Enable_Torso=false`, and GPU CUDA body tracking.
 - Production simulation publishes only SONIC joint Protocol v1 (`joint_pos`, `joint_vel`, version 1, encode mode 0), never SMPL fields.
 - Retargeting chooses the desired G1 pose; SONIC owns balance and dynamic control.

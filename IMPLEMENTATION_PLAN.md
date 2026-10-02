@@ -1,10 +1,14 @@
 # Azure Kinect → Unitree G1: implementation and validation plan
 
-> Current implementation track (2026-10-02): the requested Kinect full-body
-> path uses `KinectToG1Retargeter`, SONIC joint Protocol v1, and the released
-> encode-mode-0 policy. This supersedes this document's older SMPL/v3
-> recommendation for this path. The older audit below remains as historical
-> evidence for the separate SMPL bridge.
+> Current implementation track (2026-10-02): official GMR is now the primary
+> retargeter. `tools/kinect_gmr_bridge.py` adapts calibrated K4ABT global poses
+> to GMR's official `xsens_mvn` Unitree G1 configuration and returns GMR's
+> 29 motor coordinates. The C++ application selects this with `--retargeter
+> gmr` (default). `KinectToG1Retargeter` remains available only as
+> `--retargeter legacy` for comparison. See `docs/gmr_kinect_integration.md`.
+
+> The previous custom-retargeter note and older SMPL/v3 audit below remain as
+> historical evidence. Neither is the primary Kinect-to-G1 path.
 
 ## Full-body joint-reference implementation
 

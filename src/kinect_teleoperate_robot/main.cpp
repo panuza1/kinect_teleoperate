@@ -34,6 +34,7 @@
 // For retargeting function from the skeleton joint angles to the robot motor joint angles.
 #include "jointRetargeting.hpp"
 #include "KinectToG1Retargeter.hpp"
+#include "KinectToGMRAdapter.hpp"
 #include "SonicV1Publisher.hpp"
 
 using namespace std::chrono;
@@ -44,12 +45,16 @@ std::atomic_bool s_kinectRenderReady{false};
 bool s_alwaysActive = false;
 std::string s_bodyTrackingModelPath;
 std::string s_output = "mujoco-direct";
+std::string s_retargeterMode = "gmr";
 int s_sonicPort = 5556;
+int s_gmrPort = 5558;
 bool s_debugSkeleton = false;
 bool s_verbose = false;
 KinectToG1Retargeter s_retargeter;
+std::unique_ptr<KinectToGMRAdapter> s_gmrAdapter;
 G1Reference s_g1Reference;
 RetargetStats s_retargetStats;
+GMRAdapterStats s_gmrStats;
 KinectSkeletonSample s_lastSkeleton;
 std::uint64_t s_referenceSequence = 0;
 std::mutex s_referenceMutex;
@@ -646,7 +651,7 @@ void FullBodyControl_loop() {
             reference.joint_pos[18],reference.joint_pos[25]);
         if (active) {
             if (publisher) {
-                if (active_frames<15) publisher->publish_command(true,false);
+                publisher->publish_command(true,false);
                 if (publisher->publish(reference,static_cast<std::int64_t>(sequence))) ++sent;
                 ++active_frames;
             } else {
@@ -668,7 +673,8 @@ void FullBodyControl_loop() {
         if (elapsed>=1.0) {
             const auto limits=std::minmax_element(reference.joint_pos.begin(),reference.joint_pos.end());
             double vmax=0; for(double value:reference.joint_vel) vmax=std::max(vmax,std::abs(value));
-            std::cout << "retarget_fps=" << frames/elapsed << " qpos_min=" << *limits.first
+            std::cout << (s_retargeterMode=="gmr" ? "gmr_fps=" : "retarget_fps=") << frames/elapsed
+                      << " qpos_min=" << *limits.first
                       << " qpos_max=" << *limits.second << " qvel_max=" << vmax
                       << " output=" << s_output << " pose_tx_fps=" << sent/elapsed
                       << " active=" << (active?"yes":"no") << '\n';
@@ -713,14 +719,25 @@ void ProcessFullBodySkeletonData(k4abt_frame_t bodyFrame) {
         output.orientation_wxyz={input.orientation.wxyz.w,input.orientation.wxyz.x,input.orientation.wxyz.y,input.orientation.wxyz.z};
         output.confidence=static_cast<std::uint8_t>(input.confidence_level);
     }
-    const G1Reference reference=s_retargeter.update(sample);
-    const RetargetStats stats=s_retargeter.stats();
-    if (!stats.accepted) return;
+    std::optional<G1Reference> reference;
+    RetargetStats stats;
+    GMRAdapterStats gmr_stats;
+    if (s_retargeterMode == "legacy") {
+        const auto legacy=s_retargeter.update(sample);
+        stats=s_retargeter.stats();
+        if (stats.accepted) reference=legacy;
+    } else {
+        reference=s_gmrAdapter->update(sample);
+        gmr_stats=s_gmrAdapter->stats();
+    }
     std::scoped_lock lock(s_referenceMutex);
-    s_g1Reference=reference;
     s_retargetStats=stats;
+    s_gmrStats=gmr_stats;
     s_lastSkeleton=sample;
-    ++s_referenceSequence;
+    if (reference) {
+        s_g1Reference=*reference;
+        ++s_referenceSequence;
+    }
 }
 
 // Process the newly captured skeleton point data to calculate the joint angles that control the robot
@@ -906,15 +923,25 @@ void Main_loop(){
             const double elapsed = duration<double>(now - metric_start).count();
             if (elapsed >= 1.0) {
                 RetargetStats stats;
+                GMRAdapterStats gmr_stats;
                 KinectSkeletonSample skeleton;
                 {
                     std::scoped_lock lock(s_referenceMutex);
                     stats=s_retargetStats;
+                    gmr_stats=s_gmrStats;
                     skeleton=s_lastSkeleton;
                 }
-                std::cout << "kinect_fps=" << tracking_frames/elapsed << " body_id=" << skeleton.body_id
-                          << " valid_joints=" << stats.valid_joints << " held_joints=" << stats.held_joints
-                          << " stale_joints=" << stats.stale_joints << " output=" << s_output << '\n';
+                std::cout << "kinect_fps=" << tracking_frames/elapsed << " body_id=" << skeleton.body_id;
+                if (s_retargeterMode == "gmr") {
+                    std::cout << " valid_targets=" << gmr_stats.valid_targets
+                              << " held_targets=" << gmr_stats.held_targets
+                              << " stale_targets=" << gmr_stats.stale_targets
+                              << " gmr_solve_ms=" << gmr_stats.solve_ms;
+                } else {
+                    std::cout << " valid_joints=" << stats.valid_joints << " held_joints=" << stats.held_joints
+                              << " stale_joints=" << stats.stale_joints;
+                }
+                std::cout << " retargeter=" << s_retargeterMode << " output=" << s_output << '\n';
                 if (s_debugSkeleton || s_verbose) {
                     for (std::size_t i=0;i<skeleton.joints.size();++i) {
                         const auto& joint=skeleton.joints[i];
@@ -955,7 +982,9 @@ struct Options {
     std::string body_model = "/home/panu/.local/share/azure-kinect/1.4.1-1.1.2/usr/bin/dnn_model_2_0_op11.onnx";
     std::string mujoco_scene = KINECT_G1_SCENE_PATH;
     std::string output = "mujoco-direct";
+    std::string retargeter = "gmr";
     int port = 5556;
+    int gmr_port = 5558;
     bool always_active = false;
     bool fixed_base = false;
     bool debug_skeleton = false;
@@ -970,19 +999,24 @@ Options ParseOptions(int argc, char** argv) {
         if (arg == "--model" && i + 1 < argc) options.body_model = argv[++i];
         else if (arg == "--scene" && i + 1 < argc) options.mujoco_scene = argv[++i];
         else if (arg == "--output" && i + 1 < argc) options.output = argv[++i];
+        else if (arg == "--retargeter" && i + 1 < argc) options.retargeter = argv[++i];
         else if (arg == "--port" && i + 1 < argc) options.port = std::stoi(argv[++i]);
+        else if (arg == "--gmr-port" && i + 1 < argc) options.gmr_port = std::stoi(argv[++i]);
         else if (arg == "--always-active") options.always_active = true;
         else if (arg == "--fixed-base") options.fixed_base = true;
         else if (arg == "--debug-skeleton") options.debug_skeleton = true;
         else if (arg == "--verbose") options.verbose = true;
         else if (arg == "--help") options.help = true;
         else throw std::runtime_error(
-            "usage: kinect_teleoperate [--output mujoco-direct|sonic-v1] [--fixed-base] "
-            "[--always-active] [--debug-skeleton] [--verbose] [--port 5556] [--model PATH] [--scene PATH]");
+            "usage: kinect_teleoperate [--retargeter gmr|legacy] [--output mujoco-direct|sonic-v1] [--fixed-base] "
+            "[--always-active] [--debug-skeleton] [--verbose] [--port 5556] [--gmr-port 5558] [--model PATH] [--scene PATH]");
     }
     if (options.output != "mujoco-direct" && options.output != "sonic-v1")
         throw std::runtime_error("--output must be mujoco-direct or sonic-v1");
+    if (options.retargeter != "gmr" && options.retargeter != "legacy")
+        throw std::runtime_error("--retargeter must be gmr or legacy");
     if (options.port < 1 || options.port > 65535) throw std::runtime_error("--port must be 1..65535");
+    if (options.gmr_port < 1 || options.gmr_port > 65535) throw std::runtime_error("--gmr-port must be 1..65535");
     return options;
 }
 
@@ -996,8 +1030,8 @@ int main(int argc, char** argv)
         return 1;
     }
     if (options.help) {
-        std::cout << "usage: kinect_teleoperate [--output mujoco-direct|sonic-v1] [--fixed-base] "
-                     "[--always-active] [--debug-skeleton] [--verbose] [--port 5556] [--model PATH] [--scene PATH]\n";
+        std::cout << "usage: kinect_teleoperate [--retargeter gmr|legacy] [--output mujoco-direct|sonic-v1] [--fixed-base] "
+                     "[--always-active] [--debug-skeleton] [--verbose] [--port 5556] [--gmr-port 5558] [--model PATH] [--scene PATH]\n";
         return 0;
     }
     if (!std::filesystem::is_regular_file(options.body_model)) {
@@ -1017,9 +1051,17 @@ int main(int argc, char** argv)
     s_bodyTrackingModelPath = std::filesystem::absolute(options.body_model).string();
     s_alwaysActive = options.always_active;
     s_output = options.output;
+    s_retargeterMode = options.retargeter;
     s_sonicPort = options.port;
+    s_gmrPort = options.gmr_port;
     s_debugSkeleton = options.debug_skeleton;
     s_verbose = options.verbose;
+    if (s_retargeterMode == "gmr") {
+        s_gmrAdapter=std::make_unique<KinectToGMRAdapter>(s_gmrPort);
+        std::cout << "retargeter=gmr bridge=127.0.0.1:" << s_gmrPort << '\n';
+    } else {
+        std::cout << "retargeter=legacy diagnostic_only=yes\n";
+    }
 
     if (s_output == "mujoco-direct") {
         char error[1000];

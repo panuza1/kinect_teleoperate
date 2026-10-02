@@ -2,17 +2,17 @@
 
 ## Ownership boundary
 
-Debug path:
+Primary debug path:
 
-`Kinect -> full-body retargeter -> G1 qpos[29] -> fixed-base/kinematic MuJoCo`
+`Kinect -> calibrated KinectToGMRAdapter -> official GMR G1 IK -> G1 qpos[29] -> fixed-base/kinematic MuJoCo`
 
 Final simulation path:
 
-`Kinect -> full-body retargeter -> G1 qpos[29] + qvel[29] -> SONIC Protocol v1 -> released SONIC policy -> floating-base MuJoCo`
+`Kinect -> calibrated KinectToGMRAdapter -> official GMR G1 IK -> G1 qpos[29] + qvel[29] -> SONIC Protocol v1 -> released SONIC policy -> floating-base MuJoCo`
 
 Retargeting decides the desired G1 pose. SONIC is the whole-body controller responsible for converting that reference into dynamically stable G1 actions. Retargeting is not the balance controller. Direct mode is only a mapping diagnostic and makes no stability claim.
 
-The retargeter uses parent-child quaternion deltas captured relative to a neutral frame after camera-to-robot basis conversion. Knee flexion also uses hip-knee-ankle geometry. Unobservable DoFs use the released policy's conservative standing default. Every target is clamped to the SONIC G1 range.
+GMR solves coupled whole-body frame objectives with Mink/MuJoCo. The adapter performs units, basis conversion, heading/height calibration, confidence handling, and quaternion reference alignment only; it does not implement IK. The custom per-joint Euler retargeter remains available as `--retargeter legacy` for diagnosis, not as the preferred path. See `gmr_kinect_integration.md` for the exact transform and target table.
 
 ## SONIC Protocol v1 contract
 

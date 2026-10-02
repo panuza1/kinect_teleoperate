@@ -28,6 +28,10 @@ add_library(sonic_v1_publisher SonicV1Publisher.cpp)
 target_include_directories(sonic_v1_publisher PUBLIC include/ ${ZMQ_INCLUDE_DIR})
 target_link_libraries(sonic_v1_publisher PUBLIC kinect_g1_retargeter ${ZMQ_LIBRARY})
 
+add_library(kinect_gmr_adapter KinectToGMRAdapter.cpp)
+target_include_directories(kinect_gmr_adapter PUBLIC include/ ${ZMQ_INCLUDE_DIR})
+target_link_libraries(kinect_gmr_adapter PUBLIC kinect_g1_retargeter ${ZMQ_LIBRARY})
+
 add_executable(kinect_teleoperate main.cpp)
 target_compile_definitions(kinect_teleoperate PRIVATE
     KINECT_G1_SCENE_PATH="${SONIC_G1_SCENE}")
@@ -51,10 +55,32 @@ target_link_libraries(kinect_teleoperate PRIVATE
     Eigen3::Eigen
     kinect_g1_retargeter
     sonic_v1_publisher
+    kinect_gmr_adapter
     # unitree_sdk2
 )
 
+add_executable(kinect_gmr_sonic_sender gmr_sonic_sender.cpp)
+target_link_libraries(kinect_gmr_sonic_sender PRIVATE kinect_gmr_adapter sonic_v1_publisher)
+
 if (BUILD_TESTING)
+    set(GMR_ROOT "${CMAKE_SOURCE_DIR}/../GMR" CACHE PATH "Official GMR checkout")
+    set(GMR_PYTHON_EXECUTABLE "/home/panu/miniconda3/envs/gmr/bin/python" CACHE FILEPATH "Python with GMR dependencies")
+    if (EXISTS "${GMR_PYTHON_EXECUTABLE}" AND EXISTS "${GMR_ROOT}/general_motion_retargeting")
+        add_test(NAME kinect_gmr_adapter_test
+            COMMAND "${GMR_PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/gmr_adapter_test.py")
+        set_tests_properties(kinect_gmr_adapter_test PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${GMR_ROOT}:${CMAKE_SOURCE_DIR}/tools")
+
+        add_executable(kinect_gmr_comparison_test gmr_comparison_test.cpp)
+        target_link_libraries(kinect_gmr_comparison_test PRIVATE kinect_gmr_adapter kinect_g1_retargeter)
+        target_compile_options(kinect_gmr_comparison_test PRIVATE -UNDEBUG)
+        add_test(NAME kinect_gmr_comparison_test
+            COMMAND "${GMR_PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/gmr_ipc_comparison_test.py"
+                    "$<TARGET_FILE:kinect_gmr_comparison_test>")
+        set_tests_properties(kinect_gmr_comparison_test PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${GMR_ROOT}:${CMAKE_SOURCE_DIR}/tools")
+    endif()
+
     add_executable(kinect_g1_retargeter_test retargeter_test.cpp)
     target_link_libraries(kinect_g1_retargeter_test PRIVATE kinect_g1_retargeter)
     target_compile_options(kinect_g1_retargeter_test PRIVATE -UNDEBUG)

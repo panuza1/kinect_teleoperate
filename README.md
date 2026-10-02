@@ -327,10 +327,21 @@ When the wake-up action is performed again and successfully recognized, the comm
 
 ## Kinect full-body G1 simulation
 
-This path publishes a desired G1 pose. Direct mode is a fixed-base mapping
-debugger; only the released SONIC controller supplies whole-body balance in the
-floating-base simulator. It never controls a physical G1 and does not use hand
-or SMPL fields.
+This path publishes a desired G1 pose. Official GMR is the default whole-body
+retargeter; the custom mapping is retained only as `--retargeter legacy`.
+Direct mode is a fixed-base mapping debugger; only the released SONIC
+controller supplies whole-body balance in the floating-base simulator. It
+never controls a physical G1 and does not use hand or SMPL fields.
+
+Install the pinned GMR checkout and its already-provisioned environment:
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace
+git clone https://github.com/YanjieZe/GMR.git GMR
+cd GMR
+git checkout bb1bbe40774794fceb2a7c579a3464a28e68c844
+/home/panu/miniconda3/envs/gmr/bin/python -m pip install -e . --no-deps
+```
 
 Build:
 
@@ -345,7 +356,14 @@ Kinect full-body diagnostics:
 
 ```bash
 cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
-./build/kinect_teleoperate --output mujoco-direct --fixed-base \
+/home/panu/miniconda3/envs/gmr/bin/python tools/kinect_gmr_bridge.py --port 5558 --verbose
+```
+
+In a second terminal:
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
+./build/kinect_teleoperate --retargeter gmr --output mujoco-direct --fixed-base \
   --always-active --debug-skeleton --verbose
 ```
 
@@ -353,7 +371,7 @@ Kinect to fixed-base MuJoCo:
 
 ```bash
 cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
-./build/kinect_teleoperate --output mujoco-direct --fixed-base --always-active
+./build/kinect_teleoperate --retargeter gmr --output mujoco-direct --fixed-base --always-active
 ```
 
 SONIC floating-base MuJoCo simulator (terminal 1):
@@ -382,7 +400,7 @@ Kinect Protocol v1 publisher (terminal 3):
 
 ```bash
 cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
-./build/kinect_teleoperate --output sonic-v1 --always-active \
+./build/kinect_teleoperate --retargeter gmr --output sonic-v1 --always-active \
   --debug-skeleton --port 5556
 ```
 
@@ -390,3 +408,10 @@ The publisher uses topic `pose`, protocol version 1, encode mode 0, little-endia
 float32 `[1,29]` `joint_pos`/`joint_vel`, and loopback only. Start the simulator
 and SONIC first. Live Kinect PASS requires a connected Femto Bolt; without it,
 only the hardware-free tests above are evidence.
+
+Legacy comparison only:
+
+```bash
+./build/kinect_teleoperate --retargeter legacy --output mujoco-direct \
+  --fixed-base --always-active --debug-skeleton
+```
