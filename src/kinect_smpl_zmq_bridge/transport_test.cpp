@@ -31,6 +31,19 @@ int main() {
     frame.body_quat_w = {1, 0, 0, 0};
     frame.timestamp_monotonic_s = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+    BridgeResult gated_result;
+    gated_result.pose = frame;
+    gated_result.publish = true;
+    gated_result.dispatch = false;
+    assert(!publisher.publish_pose(gated_result, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    assert(pose_count == 0);
+
+    gated_result.dispatch = true;
+    assert(publisher.publish_pose(gated_result, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assert(pose_count == 1);
+
     for (std::uint64_t sequence = 1; sequence <= 20; ++sequence) {
         publisher.publish_command(false, false, false, 1, sequence, sequence * 33333);
         publisher.publish_pose(frame, sequence, 1, sequence, sequence * 33333);

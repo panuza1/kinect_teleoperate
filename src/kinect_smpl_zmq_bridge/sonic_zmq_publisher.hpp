@@ -1,6 +1,6 @@
 #pragma once
 
-#include "skeleton_to_smpl.hpp"
+#include "bridge_session.hpp"
 
 #include <cstdint>
 #include <chrono>
@@ -17,9 +17,10 @@ public:
     SonicZmqPublisher(const SonicZmqPublisher&) = delete;
     SonicZmqPublisher& operator=(const SonicZmqPublisher&) = delete;
 
-    void publish_pose(const SonicPoseFrame& frame, std::uint64_t frame_index,
+    bool publish_pose(const SonicPoseFrame& frame, std::uint64_t frame_index,
                       std::uint64_t epoch = 0, std::uint64_t sequence = 0,
                       std::uint64_t source_timestamp_us = 0);
+    bool publish_pose(const BridgeResult& result, std::uint64_t frame_index);
     void publish_planner(const SonicPoseFrame& frame, std::uint64_t epoch = 0,
                          std::uint64_t sequence = 0, std::uint64_t source_timestamp_us = 0);
     void publish_command(bool start, bool stop, bool planner, std::uint64_t epoch = 0,

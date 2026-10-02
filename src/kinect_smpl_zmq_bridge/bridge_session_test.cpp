@@ -79,6 +79,7 @@ int main(int argc, char** argv) {
     session_config.locomotion_enabled = true;
     session_config.mode = BridgeMode::SIM;
     BridgeSession session(session_config);
+    AutoRearmOnReady auto_rearm(true);
     SkeletonSample sample;
     sample.skeleton = neutral();
     sample.body_id = 7;
@@ -86,16 +87,21 @@ int main(int argc, char** argv) {
     auto step = [&] {
         time += 33334;
         sample.device_timestamp_us += 33334;
-        return session.process(sample, time);
+        auto result = session.process(sample, time);
+        auto_rearm.apply(session, result);
+        return result;
     };
     for (int i = 0; i < 59; ++i) {
         const auto result = step();
         assert(result.state == BridgeState::CALIBRATING && !result.publish);
     }
     BridgeResult result;
-    for (int i = 0; i < 4; ++i) result = step();
+    for (int i = 0; i < 4; ++i) {
+        result = step();
+        if (result.state == BridgeState::READY) assert(result.dispatch);
+    }
     assert(result.publish && result.state == BridgeState::TRACKING && !result.planner);
-    assert(session.request_arm());
+    assert(session.health().armed);
     result = step();
     assert(result.dispatch && session.health().armed);
     const float left_neutral = joint_z(result, 20);
@@ -194,6 +200,15 @@ int main(int argc, char** argv) {
     BridgeSession ambiguous(session_config);
     std::vector<SkeletonSample> two{sample, stranger};
     assert(ambiguous.process(two, time).state == BridgeState::NO_BODY);
+
+    for (int i = 0; i < 70 && result.state != BridgeState::READY; ++i) result = step();
+    assert(result.state == BridgeState::READY && result.dispatch && session.health().armed);
+    auto_rearm.disable();  // A device disconnect permanently disarms this process.
+    session.reset_epoch();
+    assert(!session.health().armed);
+    result = session.timeout(time += 1200000);
+    for (int i = 0; i < 70 && result.state != BridgeState::READY; ++i) result = step();
+    assert(result.state == BridgeState::READY && !result.dispatch && !session.health().armed);
 
     const auto path = argc > 1 ? std::filesystem::path(argv[1])
         : std::filesystem::temp_directory_path() /

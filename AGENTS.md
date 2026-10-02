@@ -1,4 +1,24 @@
-# Kinect → G1 planning and implementation scope
+# Kinect full-body G1 simulation scope
+
+The binding path for the current task is:
+
+`Femto Bolt/Kinect -> K4A/K4ABT GPU tracking -> KinectToG1Retargeter -> G1 qpos/qvel[29] -> either fixed-base MuJoCo debug or SONIC Protocol v1 -> released SONIC policy -> floating-base MuJoCo`.
+
+These rules supersede older SMPL/v3 recommendations later in this file for
+this path:
+
+- Read `PLAN.md`, `IMPLEMENTATION_PLAN.md`, and `docs/full_body_architecture.md` first.
+- Preserve the existing Kinect acquisition/rendering pipeline and helpers.
+- Keep `Control_G1=true`, `Real_Control=false`, `Enable_Torso=false`, and GPU CUDA body tracking.
+- Production simulation publishes only SONIC joint Protocol v1 (`joint_pos`, `joint_vel`, version 1, encode mode 0), never SMPL fields.
+- Retargeting chooses the desired G1 pose; SONIC owns balance and dynamic control.
+- Use SONIC's exact MuJoCo/reference order and limits, not the legacy hand model.
+- Direct mode is simulation-only, fixed-base/kinematic mapping inspection.
+- Never train, fine-tune, change released weights, open physical G1 DDS, or enable Inspire/Dex3.
+- A real SONIC receiver must decode the protocol integration test. The exact SONIC G1 XML must pass the model test.
+- Do not claim live Kinect success without a physical Femto Bolt session.
+
+## Historical SMPL bridge scope
 
 Read `IMPLEMENTATION_PLAN.md` and current gate evidence before implementation. The parent workspace rules still apply, but this Kinect task requires live MuJoCo validation before real G1; the parent Quest/LeRobot plan's optional-simulation rule does not apply.
 

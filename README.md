@@ -324,3 +324,69 @@ When the wake-up action is performed again and successfully recognized, the comm
 4. https://mujoco.org/
 5. https://eigen.tuxfamily.org
 6. https://github.com/glfw/glfw
+
+## Kinect full-body G1 simulation
+
+This path publishes a desired G1 pose. Direct mode is a fixed-base mapping
+debugger; only the released SONIC controller supplies whole-body balance in the
+floating-base simulator. It never controls a physical G1 and does not use hand
+or SMPL fields.
+
+Build:
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
+cmake -S . -B build
+cmake --build build -j$(nproc)
+ctest --test-dir build -R '^kinect_' --output-on-failure
+```
+
+Kinect full-body diagnostics:
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
+./build/kinect_teleoperate --output mujoco-direct --fixed-base \
+  --always-active --debug-skeleton --verbose
+```
+
+Kinect to fixed-base MuJoCo:
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
+./build/kinect_teleoperate --output mujoco-direct --fixed-base --always-active
+```
+
+SONIC floating-base MuJoCo simulator (terminal 1):
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/GR00T-WholeBodyControl
+SONIC_SIM_METRICS=1 PYTHONPATH=.:external_dependencies/unitree_sdk2_python \
+  /home/panu/miniconda3/envs/gmr/bin/python gear_sonic/scripts/run_sim_loop.py \
+  --interface sim --dds-domain 42 --no-enable-onscreen
+```
+
+SONIC Protocol v1 receiver and released policy (terminal 2):
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/GR00T-WholeBodyControl/gear_sonic_deploy
+source scripts/setup_env.sh
+./target/release/g1_deploy_onnx_ref lo policy/release/model_decoder.onnx reference/example/ \
+  --obs-config policy/release/observation_config.yaml \
+  --encoder-file policy/release/model_encoder.onnx \
+  --planner-file planner/target_vel/V2/planner_sonic.onnx \
+  --input-type zmq_manager --zmq-host 127.0.0.1 --zmq-port 5556 \
+  --disable-crc-check --no-hand-publish
+```
+
+Kinect Protocol v1 publisher (terminal 3):
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
+./build/kinect_teleoperate --output sonic-v1 --always-active \
+  --debug-skeleton --port 5556
+```
+
+The publisher uses topic `pose`, protocol version 1, encode mode 0, little-endian
+float32 `[1,29]` `joint_pos`/`joint_vel`, and loopback only. Start the simulator
+and SONIC first. Live Kinect PASS requires a connected Femto Bolt; without it,
+only the hardware-free tests above are evidence.

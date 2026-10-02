@@ -89,6 +89,16 @@ private:
     SonicPoseFrame last_output_{};
 };
 
+class AutoRearmOnReady {
+public:
+    explicit AutoRearmOnReady(bool enabled) : enabled_(enabled) {}
+    bool apply(BridgeSession& session, BridgeResult& result);
+    void disable() { enabled_ = false; }
+
+private:
+    bool enabled_;
+};
+
 // Local replay format: fixed ABI, versioned, with raw skeleton and computed result.
 struct BridgeTraceFrame {
     std::uint64_t time_us = 0;

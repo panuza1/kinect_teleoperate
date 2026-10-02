@@ -115,23 +115,23 @@ void print_skeleton(const SkeletonSample& sample, const BridgeResult& result) {
               << result.pose.yaw_rate_rps << '\n';
 }
 
-void publish(const BridgeResult& result, SonicZmqPublisher* publisher, std::uint64_t index,
+bool publish(const BridgeResult& result, SonicZmqPublisher* publisher, std::uint64_t index,
              bool start = false) {
-    if (!publisher) return;
+    if (!publisher) return false;
     publisher->publish_health(result.epoch, result.sequence, result.source_timestamp_us,
                               static_cast<std::uint8_t>(result.state));
     if (result.stop) {
         publisher->publish_command(false, true, false, result.epoch, result.sequence,
                                    result.source_timestamp_us);
-        return;
+        return false;
     }
-    if (!result.publish || !result.dispatch) return;
+    if (!result.publish || !result.dispatch) return false;
     publisher->publish_command(start, false, result.planner, result.epoch, result.sequence,
                                result.source_timestamp_us);
-    publisher->publish_pose(result.pose, index, result.epoch, result.sequence,
-                            result.source_timestamp_us);
+    const bool pose_sent = publisher->publish_pose(result, index);
     publisher->publish_planner(result.pose, result.epoch, result.sequence,
                                result.source_timestamp_us);
+    return pose_sent;
 }
 
 bool same_pose(const SonicPoseFrame& a, const SonicPoseFrame& b) {
@@ -158,6 +158,7 @@ void replay(const Options& options) {
     std::uint64_t first_time = 0, previous_time = 0, index = 0;
     const auto start = std::chrono::steady_clock::now();
     bool start_pending = false;
+    AutoRearmOnReady auto_rearm(options.arm);
     while (running && read_trace_frame(file, frame)) {
         if (!first_time) first_time = frame.time_us;
         if (frame.time_us < previous_time || frame.time_us - first_time > 3600000000ULL)
@@ -166,10 +167,9 @@ void replay(const Options& options) {
         if (!options.fast)
             std::this_thread::sleep_until(start + std::chrono::microseconds(frame.time_us - first_time));
         const auto sample = frame.has_body ? std::optional<SkeletonSample>(frame.sample) : std::nullopt;
-        const BridgeResult result = frame.capture_timeout ? session.timeout(frame.time_us)
-                                                          : session.process(sample, frame.time_us);
-        if (publisher && options.arm && result.state == BridgeState::READY)
-            start_pending = session.request_arm();
+        BridgeResult result = frame.capture_timeout ? session.timeout(frame.time_us)
+                                                    : session.process(sample, frame.time_us);
+        if (publisher && auto_rearm.apply(session, result)) start_pending = true;
         if (result.state != frame.result.state || result.publish != frame.result.publish ||
             result.planner != frame.result.planner ||
             (result.publish && !same_pose(result.pose, frame.result.pose)))
@@ -210,7 +210,7 @@ void live(const Options& options) {
                   bridge_count = 0, publish_count = 0;
     double latency_ms_sum = 0;
     BridgeState last_state = BridgeState::NO_BODY;
-    bool arm_requested = options.arm;
+    AutoRearmOnReady auto_rearm(options.arm);
     bool start_pending = false;
     while (running) {
         const auto queued_at_us = now_us();
@@ -219,7 +219,7 @@ void live(const Options& options) {
         const bool capture_timeout = frame.event == AcquisitionEvent::TIMEOUT;
         if (frame.event == AcquisitionEvent::DISCONNECTED || frame.event == AcquisitionEvent::TRACKER_ERROR) {
             session.reset_epoch();
-            arm_requested = false;
+            auto_rearm.disable();
             int backoff_ms = 100;
             while (running) {
                 try {
@@ -236,12 +236,9 @@ void live(const Options& options) {
         }
         if (frame.color_timestamp_us && frame.depth_timestamp_us) ++capture_count;
         if (!capture_timeout) ++tracking_count;
-        const BridgeResult result = capture_timeout ? session.timeout(time_us)
-                                                    : session.process(frame.bodies, time_us);
-        if (publisher && arm_requested && result.state == BridgeState::READY) {
-            start_pending = session.request_arm();
-            arm_requested = false;
-        }
+        BridgeResult result = capture_timeout ? session.timeout(time_us)
+                                              : session.process(frame.bodies, time_us);
+        if (publisher && auto_rearm.apply(session, result)) start_pending = true;
         if (result.publish) ++bridge_count;
         if (result.state != last_state) {
             std::cout << "bridge_state=" << state_name(result.state) << '\n';
@@ -252,9 +249,9 @@ void live(const Options& options) {
         if (options.debug_skeleton && frame.bodies.size() == 1 && index % 30 == 0)
             print_skeleton(frame.bodies.front(), result);
         if (publisher && result.publish) {
-            publish(result, publisher.get(), index, start_pending && result.dispatch);
+            const bool pose_sent = publish(result, publisher.get(), index, start_pending && result.dispatch);
             if (result.dispatch) start_pending = false;
-            ++publish_count;
+            if (pose_sent) ++publish_count;
         }
         if (frame.bodies.size() == 1) {
             ++body_count;

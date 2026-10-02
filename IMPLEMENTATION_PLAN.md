@@ -1,5 +1,21 @@
 # Azure Kinect → Unitree G1: implementation and validation plan
 
+> Current implementation track (2026-10-02): the requested Kinect full-body
+> path uses `KinectToG1Retargeter`, SONIC joint Protocol v1, and the released
+> encode-mode-0 policy. This supersedes this document's older SMPL/v3
+> recommendation for this path. The older audit below remains as historical
+> evidence for the separate SMPL bridge.
+
+## Full-body joint-reference implementation
+
+1. Preserve K4A/K4ABT GPU acquisition and translate the selected 19-joint skeleton into one timestamped, confidence-aware sample.
+2. Calibrate parent-relative Kinect orientations at neutral and convert camera axes (`+x right,+y down,+z forward`) to G1 axes (`+x forward,+y left,+z up`).
+3. Produce SONIC MuJoCo/reference-order `joint_pos[29]` and `joint_vel[29]`, clamped to authoritative SONIC G1 XML limits.
+4. Hold an individually missing joint briefly; never reset the session for a transient ankle confidence drop.
+5. Debug by writing named qpos addresses in SONIC's G1 model while pinning its free base. This is visualization only.
+6. Publish only Protocol v1 fields on loopback for the released SONIC controller and existing floating-base simulator. No SMPL fields, hands, real DDS, training, or policy changes.
+7. Validate the pure retargeter, SONIC's actual packed-message decoder, and the exact MuJoCo model before hardware use. Live Kinect remains BLOCKED until a Femto Bolt session is run.
+
 Planning baseline: 2026-09-22. This document is the implementation contract for a subsequent GPT-5.6 session. This task changes documentation only. No device session, DDS publisher, controller, or real robot motion was started during this audit.
 
 ## 1. Scope, evidence, and decisions

@@ -14,9 +14,13 @@
 #include <mutex>
 #include <array>
 #include <atomic>
+#include <filesystem>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
 #include <vector>
 #include <string>
+#include <utility>
 
 // For mujoco render
 #include <mujoco/mujoco.h>
@@ -29,12 +33,26 @@
 #include "StartEndPoseDetector.hpp"
 // For retargeting function from the skeleton joint angles to the robot motor joint angles.
 #include "jointRetargeting.hpp"
+#include "KinectToG1Retargeter.hpp"
+#include "SonicV1Publisher.hpp"
 
 using namespace std::chrono;
 
-bool s_isRunning = true;
+std::atomic_bool s_isRunning{true};
 std::atomic_bool s_kinectReady{false};
 std::atomic_bool s_kinectRenderReady{false};
+bool s_alwaysActive = false;
+std::string s_bodyTrackingModelPath;
+std::string s_output = "mujoco-direct";
+int s_sonicPort = 5556;
+bool s_debugSkeleton = false;
+bool s_verbose = false;
+KinectToG1Retargeter s_retargeter;
+G1Reference s_g1Reference;
+RetargetStats s_retargetStats;
+KinectSkeletonSample s_lastSkeleton;
+std::uint64_t s_referenceSequence = 0;
+std::mutex s_referenceMutex;
 
 #define Control_G1 true
 #define Control_H1 false
@@ -53,7 +71,19 @@ std::atomic_bool s_kinectRenderReady{false};
 // ':=' means that the item on the left hand side is being defined to be what is on the right hand side.
 // sc:=spine chest, ls:=left shoulder, le:=left elbow, rs:=right shoulder, re:=right elbow, lh:=left hand, rh:=right hand
 // _r:=roll, _p:=pitch, _y:=yaw, _a:=angle
-static float sc_r, sc_p, sc_y, ls_r, ls_p, ls_y, le_r, le_p, le_y, rs_r, rs_p, rs_y, re_r, re_p, re_y, lh_a, rh_a;
+struct KinectJointAngles {
+    float sc_r = 0, sc_p = 0, sc_y = 0;
+    float ls_r = 0, ls_p = 0, ls_y = 0;
+    float le_r = 0, le_p = 0, le_y = 0;
+    float rs_r = 0, rs_p = 0, rs_y = 0;
+    float re_r = 0, re_p = 0, re_y = 0;
+    std::array<int, 5> confidence{};
+    uint32_t body_id = 0;
+    uint64_t sequence = 0;
+};
+
+KinectJointAngles s_jointAngles;
+std::mutex s_jointAnglesMutex;
 
 struct hardware_control_signal {
     double left_shoulder_roll = 0.0;
@@ -81,6 +111,7 @@ hardware_control_signal H1_hardware_signal;
 Visualization::Layout3d s_layoutMode = Visualization::Layout3d::OnlyMainView;
 bool s_visualizeJointFrame = false;
 k4abt_frame_t globalBodyFrameForSkeleton = nullptr;
+std::mutex s_bodyFrameMutex;
 
 void PrintUsage()
 {
@@ -225,10 +256,14 @@ void KinectRender_loop(k4a_calibration_t sensorCalibration) {
 
     time_point<high_resolution_clock> KinectRender_start;
     while (s_isRunning) {
-        if (globalBodyFrameForSkeleton != nullptr) {
-            renderSkeletonAndPointCloud(globalBodyFrameForSkeleton, kinectRenderWindow, depthWidth, depthHeight);
-            k4abt_frame_release(globalBodyFrameForSkeleton);
-            globalBodyFrameForSkeleton = nullptr;
+        k4abt_frame_t bodyFrame = nullptr;
+        {
+            std::scoped_lock lock(s_bodyFrameMutex);
+            std::swap(bodyFrame, globalBodyFrameForSkeleton);
+        }
+        if (bodyFrame != nullptr) {
+            renderSkeletonAndPointCloud(bodyFrame, kinectRenderWindow, depthWidth, depthHeight);
+            k4abt_frame_release(bodyFrame);
 
             kinectRenderWindow.SetLayout3d(s_layoutMode);
             kinectRenderWindow.SetJointFrameVisualization(s_visualizeJointFrame);
@@ -253,6 +288,7 @@ void KinectRender_loop(k4a_calibration_t sensorCalibration) {
 
 mjModel* m = nullptr;               // MuJoCo model
 mjData*  d = nullptr;               // MuJoCo data
+std::mutex s_mujocoMutex;
 
 GLFWwindow* mujocoRenderWindow;
 mjvCamera cam;                      // abstract camera
@@ -344,6 +380,7 @@ void initCamera(mjvCamera* camera) {
 }
 
 void DrawOneFrame(GLFWwindow* window) {
+    std::scoped_lock lock(s_mujocoMutex);
     // get framebuffer viewport
     glfwMakeContextCurrent(window);
     mjrRect viewport = {0, 0, 0, 0};
@@ -365,6 +402,10 @@ void MujocoRender_loop() {
 
     time_point<high_resolution_clock> mujocoRender_start;
     while (s_isRunning) {
+        if (glfwWindowShouldClose(mujocoRenderWindow)) {
+            s_isRunning = false;
+            break;
+        }
         DrawOneFrame(mujocoRenderWindow);
 
         #if EchoFrequency
@@ -379,8 +420,6 @@ void MujocoRender_loop() {
     mjv_freeScene(&scn);
     mjr_freeContext(&con);
     glfwDestroyWindow(mujocoRenderWindow);
-    mj_deleteData(d);
-    mj_deleteModel(m);
 }
 
 /*****************************************************Real Unitree Robot Control*****************************************************************/
@@ -404,6 +443,9 @@ void MujocoRender_loop() {
 
 void Control_loop() {
     std::cout<<"control loop start..."<<std::endl;
+    std::cout << "[direct] arm_order=left_shoulder_pitch,left_shoulder_roll,left_shoulder_yaw,"
+                 "left_elbow_pitch,right_shoulder_pitch,right_shoulder_roll,right_shoulder_yaw,"
+                 "right_elbow_pitch" << std::endl;
     int left_shoulder_roll_joint_id = mj_name2id(m, mjOBJ_ACTUATOR, "left_shoulder_roll_joint");
     int left_shoulder_pitch_joint_id = mj_name2id(m, mjOBJ_ACTUATOR, "left_shoulder_pitch_joint");
     int left_shoulder_yaw_joint_id = mj_name2id(m, mjOBJ_ACTUATOR, "left_shoulder_yaw_joint");
@@ -420,8 +462,23 @@ void Control_loop() {
     #if Enable_Torso
     int torso_joint_id = mj_name2id(m, mjOBJ_ACTUATOR, "torso_joint");
     #endif
-    
-    mj_step(m, d); // For starting render mujoco
+
+    const std::array<int, 8> actuator_ids{
+        left_shoulder_pitch_joint_id, left_shoulder_roll_joint_id, left_shoulder_yaw_joint_id,
+        left_elbow_pitch_joint_id, right_shoulder_pitch_joint_id, right_shoulder_roll_joint_id,
+        right_shoulder_yaw_joint_id, right_elbow_pitch_joint_id};
+    for (int id : actuator_ids) {
+        if (id < 0) {
+            std::cerr << "Required G1 arm actuator is missing from the MuJoCo model" << std::endl;
+            s_isRunning = false;
+            return;
+        }
+    }
+
+    {
+        std::scoped_lock lock(s_mujocoMutex);
+        mj_step(m, d); // For starting render mujoco
+    }
 
     MovingAverageFilter ls_r_filter,ls_p_filter,ls_y_filter,
                         rs_r_filter,rs_p_filter,rs_y_filter,
@@ -429,24 +486,36 @@ void Control_loop() {
 
     StartEndPoseDetector pose_detector;
 
-    time_point<high_resolution_clock> ctrl_start;
+    auto diagnostic_start = steady_clock::now();
+    uint64_t previous_sequence = 0;
     while (s_isRunning) {
-        double left_shoulder_roll = LS_mappingCameraRoll2RobotRadians(ls_r);
-        double left_shoulder_pitch = LS_mappingCameraPitch2RobotRadians(ls_p);
-        double left_shoulder_yaw = LS_mappingCameraYaw2RobotRadians(ls_y);
-        double right_shoulder_roll = RS_mappingCameraRoll2RobotRadians(rs_r);
-        double right_shoulder_pitch = RS_mappingCameraPitch2RobotRadians(rs_p);
-        double right_shoulder_yaw = RS_mappingCameraYaw2RobotRadians(rs_y);
-        double left_elbow_yaw = LE_mappingCameraYaw2RobotRadians(le_y);
-        double right_elbow_yaw = RE_mappingCameraYaw2RobotRadians(re_y);
+        KinectJointAngles angles;
+        {
+            std::scoped_lock lock(s_jointAnglesMutex);
+            angles = s_jointAngles;
+        }
+        if (angles.sequence == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+
+        double left_shoulder_roll = LS_mappingCameraRoll2RobotRadians(angles.ls_r);
+        double left_shoulder_pitch = LS_mappingCameraPitch2RobotRadians(angles.ls_p);
+        double left_shoulder_yaw = LS_mappingCameraYaw2RobotRadians(angles.ls_y);
+        double right_shoulder_roll = RS_mappingCameraRoll2RobotRadians(angles.rs_r);
+        double right_shoulder_pitch = RS_mappingCameraPitch2RobotRadians(angles.rs_p);
+        double right_shoulder_yaw = RS_mappingCameraYaw2RobotRadians(angles.rs_y);
+        double left_elbow_yaw = LE_mappingCameraYaw2RobotRadians(angles.le_y);
+        double right_elbow_yaw = RE_mappingCameraYaw2RobotRadians(angles.re_y);
 
         #if Enable_Torso
-        double spine_chest_torso = SC_mappingCameraPitch2RobotTorso(sc_p);
+        double spine_chest_torso = SC_mappingCameraPitch2RobotTorso(angles.sc_p);
         #endif
 
-        bool start = pose_detector.isStartEndPose(left_shoulder_roll, left_shoulder_pitch, left_shoulder_yaw,
-                                                  right_shoulder_roll, right_shoulder_pitch, right_shoulder_yaw,
-                                                  left_elbow_yaw, right_elbow_yaw);
+        bool start = s_alwaysActive || pose_detector.isStartEndPose(
+            left_shoulder_roll, left_shoulder_pitch, left_shoulder_yaw,
+            right_shoulder_roll, right_shoulder_pitch, right_shoulder_yaw,
+            left_elbow_yaw, right_elbow_yaw);
         if(start)
         {
             // smoothing
@@ -462,6 +531,7 @@ void Control_loop() {
             spine_chest_torso = sc_p_filter.update(spine_chest_torso);
             #endif
 
+            std::scoped_lock lock(s_mujocoMutex);
             mj_step1(m, d);
             // The coordinate system of the robot joints is as follows: the x-axis (roll) points forward, the y-axis (pitch) points left, 
             // and the z-axis (yaw) points upward. 
@@ -505,17 +575,153 @@ void Control_loop() {
             #endif
             #endif
 
-            #if EchoFrequency
-            time_point<high_resolution_clock> ctrl_end = high_resolution_clock::now();
-            auto duration = duration_cast<microseconds>(ctrl_end - ctrl_start).count();
-            double frequency = 1e6 / duration;
-            ctrl_start = ctrl_end;
-            std::cout << "Control loop: " << frequency << " Hz" << std::endl;
-            #endif
+        }
+
+        const auto now = steady_clock::now();
+        if (now - diagnostic_start >= seconds(1)) {
+            std::array<double, 8> actuator_targets{};
+            {
+                std::scoped_lock lock(s_mujocoMutex);
+                for (size_t i = 0; i < actuator_ids.size(); ++i)
+                    actuator_targets[i] = d->ctrl[actuator_ids[i]];
+            }
+            std::cout << "[direct] wake=" << (start ? "ACTIVE" : "WAITING")
+                      << " raw=" << angles.ls_r << ',' << angles.ls_p << ',' << angles.ls_y << ','
+                      << angles.le_y << ',' << angles.rs_r << ',' << angles.rs_p << ','
+                      << angles.rs_y << ',' << angles.re_y
+                      << " retarget=" << left_shoulder_yaw << ',' << left_shoulder_pitch << ','
+                      << left_shoulder_roll << ',' << left_elbow_yaw << ',' << right_shoulder_yaw << ','
+                      << right_shoulder_pitch << ',' << right_shoulder_roll << ',' << right_elbow_yaw
+                      << " actuator=";
+            for (size_t i = 0; i < actuator_targets.size(); ++i)
+                std::cout << (i ? "," : "") << actuator_targets[i];
+            std::cout << " input_changed=" << (angles.sequence != previous_sequence ? "yes" : "no") << std::endl;
+            previous_sequence = angles.sequence;
+            diagnostic_start = now;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
+
+void FullBodyControl_loop() {
+    std::unique_ptr<SonicV1Publisher> publisher;
+    std::array<int,29> qpos_address{};
+    std::array<double,7> fixed_base{};
+    if (s_output == "sonic-v1") {
+        publisher = std::make_unique<SonicV1Publisher>(s_sonicPort);
+    } else {
+        for (std::size_t i=0;i<29;++i) {
+            const int joint=mj_name2id(m,mjOBJ_JOINT,KinectToG1Retargeter::joint_names[i]);
+            const int actuator=mj_name2id(m,mjOBJ_ACTUATOR,KinectToG1Retargeter::actuator_names[i]);
+            if (joint<0 || actuator<0) {
+                std::cerr << "Missing SONIC G1 joint/actuator: " << KinectToG1Retargeter::joint_names[i] << '\n';
+                s_isRunning=false;
+                return;
+            }
+            qpos_address[i]=m->jnt_qposadr[joint];
+        }
+        for (int i=0;i<std::min(7,m->nq);++i) fixed_base[i]=d->qpos[i];
+    }
+
+    StartEndPoseDetector pose_detector;
+    auto metric_start=steady_clock::now();
+    std::uint64_t consumed=0, frames=0, sent=0, active_frames=0;
+    bool was_active=false;
+    while (s_isRunning) {
+        G1Reference reference;
+        std::uint64_t sequence=0;
+        {
+            std::scoped_lock lock(s_referenceMutex);
+            reference=s_g1Reference;
+            sequence=s_referenceSequence;
+        }
+        if (!sequence || sequence==consumed) {
+            std::this_thread::sleep_for(milliseconds(5));
+            continue;
+        }
+        const bool active=s_alwaysActive || pose_detector.isStartEndPose(
+            reference.joint_pos[16],reference.joint_pos[15],reference.joint_pos[17],
+            reference.joint_pos[23],reference.joint_pos[22],reference.joint_pos[24],
+            reference.joint_pos[18],reference.joint_pos[25]);
+        if (active) {
+            if (publisher) {
+                if (active_frames<15) publisher->publish_command(true,false);
+                if (publisher->publish(reference,static_cast<std::int64_t>(sequence))) ++sent;
+                ++active_frames;
+            } else {
+                std::scoped_lock lock(s_mujocoMutex);
+                for (int i=0;i<std::min(7,m->nq);++i) d->qpos[i]=fixed_base[i];
+                for (int i=0;i<m->nv;++i) d->qvel[i]=0;
+                for (std::size_t i=0;i<29;++i) d->qpos[qpos_address[i]]=reference.joint_pos[i];
+                mj_forward(m,d);
+            }
+        } else if (publisher && was_active) {
+            publisher->publish_command(false,true);
+            active_frames=0;
+        }
+        was_active=active;
+        consumed=sequence;
+        ++frames;
+        const auto now=steady_clock::now();
+        const double elapsed=duration<double>(now-metric_start).count();
+        if (elapsed>=1.0) {
+            const auto limits=std::minmax_element(reference.joint_pos.begin(),reference.joint_pos.end());
+            double vmax=0; for(double value:reference.joint_vel) vmax=std::max(vmax,std::abs(value));
+            std::cout << "retarget_fps=" << frames/elapsed << " qpos_min=" << *limits.first
+                      << " qpos_max=" << *limits.second << " qvel_max=" << vmax
+                      << " output=" << s_output << " pose_tx_fps=" << sent/elapsed
+                      << " active=" << (active?"yes":"no") << '\n';
+            if (s_verbose) {
+                for (std::size_t i=0;i<29;++i)
+                    std::cout << KinectToG1Retargeter::joint_names[i] << '=' << reference.joint_pos[i]
+                              << " vel=" << reference.joint_vel[i] << '\n';
+            }
+            frames=sent=0;
+            metric_start=now;
         }
     }
 }
 
+void ProcessFullBodySkeletonData(k4abt_frame_t bodyFrame) {
+    const std::uint32_t count=k4abt_frame_get_num_bodies(bodyFrame);
+    if (!count) return;
+    std::uint32_t closest=0;
+    float min_distance=std::numeric_limits<float>::max();
+    k4abt_body_t body{};
+    for (std::uint32_t i=0;i<count;++i) {
+        k4abt_body_t candidate{};
+        if (k4abt_frame_get_body_skeleton(bodyFrame,i,&candidate.skeleton)!=K4A_RESULT_SUCCEEDED) continue;
+        const float distance=candidate.skeleton.joints[K4ABT_JOINT_SPINE_CHEST].position.xyz.z;
+        if (distance<min_distance) { min_distance=distance; closest=i; body=candidate; }
+    }
+
+    KinectSkeletonSample sample;
+    sample.timestamp_us=k4abt_frame_get_device_timestamp_usec(bodyFrame);
+    sample.body_id=k4abt_frame_get_body_id(bodyFrame,closest);
+    const std::array<std::pair<KinectJoint,k4abt_joint_id_t>,19> mapping{{
+        {KinectJoint::Pelvis,K4ABT_JOINT_PELVIS}, {KinectJoint::SpineNavel,K4ABT_JOINT_SPINE_NAVEL},
+        {KinectJoint::SpineChest,K4ABT_JOINT_SPINE_CHEST}, {KinectJoint::Neck,K4ABT_JOINT_NECK}, {KinectJoint::Head,K4ABT_JOINT_HEAD},
+        {KinectJoint::LeftShoulder,K4ABT_JOINT_SHOULDER_LEFT}, {KinectJoint::LeftElbow,K4ABT_JOINT_ELBOW_LEFT}, {KinectJoint::LeftWrist,K4ABT_JOINT_WRIST_LEFT},
+        {KinectJoint::RightShoulder,K4ABT_JOINT_SHOULDER_RIGHT}, {KinectJoint::RightElbow,K4ABT_JOINT_ELBOW_RIGHT}, {KinectJoint::RightWrist,K4ABT_JOINT_WRIST_RIGHT},
+        {KinectJoint::LeftHip,K4ABT_JOINT_HIP_LEFT}, {KinectJoint::LeftKnee,K4ABT_JOINT_KNEE_LEFT}, {KinectJoint::LeftAnkle,K4ABT_JOINT_ANKLE_LEFT}, {KinectJoint::LeftFoot,K4ABT_JOINT_FOOT_LEFT},
+        {KinectJoint::RightHip,K4ABT_JOINT_HIP_RIGHT}, {KinectJoint::RightKnee,K4ABT_JOINT_KNEE_RIGHT}, {KinectJoint::RightAnkle,K4ABT_JOINT_ANKLE_RIGHT}, {KinectJoint::RightFoot,K4ABT_JOINT_FOOT_RIGHT}}};
+    for (const auto& [target,source] : mapping) {
+        const auto& input=body.skeleton.joints[source];
+        auto& output=sample.joints[static_cast<std::size_t>(target)];
+        output.position_mm={input.position.xyz.x,input.position.xyz.y,input.position.xyz.z};
+        output.orientation_wxyz={input.orientation.wxyz.w,input.orientation.wxyz.x,input.orientation.wxyz.y,input.orientation.wxyz.z};
+        output.confidence=static_cast<std::uint8_t>(input.confidence_level);
+    }
+    const G1Reference reference=s_retargeter.update(sample);
+    const RetargetStats stats=s_retargeter.stats();
+    if (!stats.accepted) return;
+    std::scoped_lock lock(s_referenceMutex);
+    s_g1Reference=reference;
+    s_retargetStats=stats;
+    s_lastSkeleton=sample;
+    ++s_referenceSequence;
+}
 
 // Process the newly captured skeleton point data to calculate the joint angles that control the robot
 void ProcessNewSkeletonData(k4abt_frame_t bodyFrame) {
@@ -549,37 +755,40 @@ void ProcessNewSkeletonData(k4abt_frame_t bodyFrame) {
         return;
     }
 
-    // temp var
-    k4a_quaternion_t relativeJointOrientation;
-    static k4a_quaternion_t SpineChest_orientation, LeftShoulder_orientation, RightShoulder_orientation;
+    static k4a_quaternion_t spine_chest{}, left_shoulder{}, right_shoulder{};
+    const std::array<k4abt_joint_id_t, 5> joints{
+        K4ABT_JOINT_SPINE_CHEST, K4ABT_JOINT_SHOULDER_LEFT, K4ABT_JOINT_SHOULDER_RIGHT,
+        K4ABT_JOINT_ELBOW_LEFT, K4ABT_JOINT_ELBOW_RIGHT};
+    std::scoped_lock lock(s_jointAnglesMutex);
+    s_jointAngles.body_id = k4abt_frame_get_body_id(bodyFrame, closestBodyIndex);
+    for (size_t i = 0; i < joints.size(); ++i)
+        s_jointAngles.confidence[i] = closestBody.skeleton.joints[joints[i]].confidence_level;
 
-    if(closestBody.skeleton.joints[K4ABT_JOINT_SPINE_CHEST].confidence_level > K4ABT_JOINT_CONFIDENCE_LOW){
-        SpineChest_orientation = closestBody.skeleton.joints[K4ABT_JOINT_SPINE_CHEST].orientation;
-        quaternion2Euler(SpineChest_orientation, sc_r, sc_p, sc_y);
+    if (s_jointAngles.confidence[0] > K4ABT_JOINT_CONFIDENCE_LOW) {
+        spine_chest = closestBody.skeleton.joints[K4ABT_JOINT_SPINE_CHEST].orientation;
+        quaternion2Euler(spine_chest, s_jointAngles.sc_r, s_jointAngles.sc_p, s_jointAngles.sc_y);
     }
-
-    if(closestBody.skeleton.joints[K4ABT_JOINT_SHOULDER_LEFT].confidence_level > K4ABT_JOINT_CONFIDENCE_LOW){
-        LeftShoulder_orientation = closestBody.skeleton.joints[K4ABT_JOINT_SHOULDER_LEFT].orientation;
-        relativeJointOrientation = calculateRelativeQuaternion(LeftShoulder_orientation, SpineChest_orientation);
-        quaternion2Euler(relativeJointOrientation, ls_r, ls_p, ls_y);
+    if (s_jointAngles.confidence[1] > K4ABT_JOINT_CONFIDENCE_LOW) {
+        left_shoulder = closestBody.skeleton.joints[K4ABT_JOINT_SHOULDER_LEFT].orientation;
+        const auto relative = calculateRelativeQuaternion(left_shoulder, spine_chest);
+        quaternion2Euler(relative, s_jointAngles.ls_r, s_jointAngles.ls_p, s_jointAngles.ls_y);
     }
-
-    if(closestBody.skeleton.joints[K4ABT_JOINT_ELBOW_LEFT].confidence_level > K4ABT_JOINT_CONFIDENCE_LOW){
-        relativeJointOrientation = calculateRelativeQuaternion(closestBody.skeleton.joints[K4ABT_JOINT_ELBOW_LEFT].orientation, LeftShoulder_orientation);
-        quaternion2Euler(relativeJointOrientation, le_r, le_p, le_y);
+    if (s_jointAngles.confidence[3] > K4ABT_JOINT_CONFIDENCE_LOW) {
+        const auto relative = calculateRelativeQuaternion(
+            closestBody.skeleton.joints[K4ABT_JOINT_ELBOW_LEFT].orientation, left_shoulder);
+        quaternion2Euler(relative, s_jointAngles.le_r, s_jointAngles.le_p, s_jointAngles.le_y);
     }
-
-    if(closestBody.skeleton.joints[K4ABT_JOINT_SHOULDER_RIGHT].confidence_level > K4ABT_JOINT_CONFIDENCE_LOW){
-        RightShoulder_orientation = closestBody.skeleton.joints[K4ABT_JOINT_SHOULDER_RIGHT].orientation;
-        relativeJointOrientation = calculateRelativeQuaternion(RightShoulder_orientation, SpineChest_orientation);
-        quaternion2Euler(relativeJointOrientation, rs_r, rs_p, rs_y);
-
+    if (s_jointAngles.confidence[2] > K4ABT_JOINT_CONFIDENCE_LOW) {
+        right_shoulder = closestBody.skeleton.joints[K4ABT_JOINT_SHOULDER_RIGHT].orientation;
+        const auto relative = calculateRelativeQuaternion(right_shoulder, spine_chest);
+        quaternion2Euler(relative, s_jointAngles.rs_r, s_jointAngles.rs_p, s_jointAngles.rs_y);
     }
-    
-    if(closestBody.skeleton.joints[K4ABT_JOINT_ELBOW_RIGHT].confidence_level > K4ABT_JOINT_CONFIDENCE_LOW){
-        relativeJointOrientation = calculateRelativeQuaternion(closestBody.skeleton.joints[K4ABT_JOINT_ELBOW_RIGHT].orientation, RightShoulder_orientation);
-        quaternion2Euler(relativeJointOrientation, re_r, re_p, re_y);
+    if (s_jointAngles.confidence[4] > K4ABT_JOINT_CONFIDENCE_LOW) {
+        const auto relative = calculateRelativeQuaternion(
+            closestBody.skeleton.joints[K4ABT_JOINT_ELBOW_RIGHT].orientation, right_shoulder);
+        quaternion2Euler(relative, s_jointAngles.re_r, s_jointAngles.re_p, s_jointAngles.re_y);
     }
+    ++s_jointAngles.sequence;
     
     // For hand open and closing status detect
     #if Enable_Hand
@@ -616,6 +825,11 @@ void Main_loop(){
     PrintUsage();
 
     k4a_device_t device = nullptr;
+    if (k4a_device_get_installed_count() == 0) {
+        std::cerr << "Femto Bolt/K4A-compatible device not detected" << std::endl;
+        s_isRunning = false;
+        return;
+    }
     VERIFY(k4a_device_open(0, &device), "Open K4A Device failed!");
 
     // Start camera. Make sure depth camera is enabled.
@@ -636,6 +850,8 @@ void Main_loop(){
     k4abt_tracker_t tracker = nullptr;
     k4abt_tracker_configuration_t trackerConfig = K4ABT_TRACKER_CONFIG_DEFAULT;
     trackerConfig.processing_mode = K4ABT_TRACKER_PROCESSING_MODE_GPU_CUDA;
+    trackerConfig.model_path = s_bodyTrackingModelPath.c_str();
+    std::cout << "body_tracker=GPU_CUDA model=" << trackerConfig.model_path << std::endl;
     VERIFY(k4abt_tracker_create(&sensorCalibration, trackerConfig, &tracker), "Body tracker initialization failed!");
     // Do not use Kinect's built-in smoothing
     k4abt_tracker_set_temporal_smoothing(tracker, 0.0);
@@ -643,14 +859,16 @@ void Main_loop(){
 
     std::thread KinectRender_thread(KinectRender_loop, sensorCalibration);
 
-    time_point<high_resolution_clock> main_start;
+    auto metric_start = steady_clock::now();
+    uint64_t tracking_frames = 0;
+    bool previous_body_detected = false;
     while (s_isRunning)
     {
         k4a_capture_t sensorCapture = nullptr;
-        k4a_wait_result_t getCaptureResult = k4a_device_get_capture(device, &sensorCapture, 0); // without blocking, timeout_in_ms is set to 0 
+        k4a_wait_result_t getCaptureResult = k4a_device_get_capture(device, &sensorCapture, 100);
         if (getCaptureResult == K4A_WAIT_RESULT_SUCCEEDED)
         {
-            k4a_wait_result_t queueCaptureResult = k4abt_tracker_enqueue_capture(tracker, sensorCapture, 0); // without blocking, timeout_in_ms is set to 0 
+            k4a_wait_result_t queueCaptureResult = k4abt_tracker_enqueue_capture(tracker, sensorCapture, 100);
             k4a_capture_release(sensorCapture);
             if (queueCaptureResult == K4A_WAIT_RESULT_FAILED)
             {
@@ -665,30 +883,57 @@ void Main_loop(){
         }
 
         k4abt_frame_t bodyFrame = nullptr;
-        k4a_wait_result_t popFrameResult = k4abt_tracker_pop_result(tracker, &bodyFrame, 0); // without blocking, timeout_in_ms is set to 0
+        k4a_wait_result_t popFrameResult = k4abt_tracker_pop_result(tracker, &bodyFrame, 100);
         if (popFrameResult == K4A_WAIT_RESULT_SUCCEEDED)
         {
-            if (globalBodyFrameForSkeleton == nullptr)
             {
-                // Passing references for increased efficiency, manually managing reference counts
-                globalBodyFrameForSkeleton = bodyFrame;
-                k4abt_frame_reference(globalBodyFrameForSkeleton);
+                std::scoped_lock lock(s_bodyFrameMutex);
+                if (globalBodyFrameForSkeleton == nullptr) {
+                    globalBodyFrameForSkeleton = bodyFrame;
+                    k4abt_frame_reference(globalBodyFrameForSkeleton);
+                }
             }
-            ProcessNewSkeletonData(bodyFrame);
+            const bool body_detected = k4abt_frame_get_num_bodies(bodyFrame) > 0;
+            ProcessFullBodySkeletonData(bodyFrame);
             k4abt_frame_release(bodyFrame);
+            ++tracking_frames;
+            if (body_detected != previous_body_detected) {
+                std::cout << "[direct] body_detected=" << (body_detected ? "yes" : "no") << std::endl;
+                previous_body_detected = body_detected;
+            }
 
-            #if EchoFrequency
-            time_point<high_resolution_clock> main_end = high_resolution_clock::now();
-            auto duration = duration_cast<milliseconds>(main_end - main_start).count();
-            double frequency = 1e3 / duration;
-            main_start = main_end;
-            std::cout << "Main loop : " << frequency << " Hz" << std::endl;
-            #endif
+            const auto now = steady_clock::now();
+            const double elapsed = duration<double>(now - metric_start).count();
+            if (elapsed >= 1.0) {
+                RetargetStats stats;
+                KinectSkeletonSample skeleton;
+                {
+                    std::scoped_lock lock(s_referenceMutex);
+                    stats=s_retargetStats;
+                    skeleton=s_lastSkeleton;
+                }
+                std::cout << "kinect_fps=" << tracking_frames/elapsed << " body_id=" << skeleton.body_id
+                          << " valid_joints=" << stats.valid_joints << " held_joints=" << stats.held_joints
+                          << " stale_joints=" << stats.stale_joints << " output=" << s_output << '\n';
+                if (s_debugSkeleton || s_verbose) {
+                    for (std::size_t i=0;i<skeleton.joints.size();++i) {
+                        const auto& joint=skeleton.joints[i];
+                        std::cout << "joint=" << i << " confidence=" << static_cast<int>(joint.confidence)
+                                  << " held=" << stats.held[i] << " stale=" << stats.stale[i];
+                        if (s_verbose) std::cout << " orientation_wxyz=" << joint.orientation_wxyz[0] << ','
+                            << joint.orientation_wxyz[1] << ',' << joint.orientation_wxyz[2] << ',' << joint.orientation_wxyz[3];
+                        std::cout << '\n';
+                    }
+                }
+                tracking_frames = 0;
+                metric_start = now;
+            }
         }
     }
 
     std::cout << "kinect_teleoperate_robot finished!" << std::endl;
 
+    s_isRunning = false;
     k4abt_tracker_shutdown(tracker);
     k4abt_tracker_destroy(tracker);
 
@@ -696,37 +941,122 @@ void Main_loop(){
     k4a_device_close(device);
 
     KinectRender_thread.join();
+    {
+        std::scoped_lock lock(s_bodyFrameMutex);
+        if (globalBodyFrameForSkeleton) {
+            k4abt_frame_release(globalBodyFrameForSkeleton);
+            globalBodyFrameForSkeleton = nullptr;
+        }
+    }
 }
 
 
+struct Options {
+    std::string body_model = "/home/panu/.local/share/azure-kinect/1.4.1-1.1.2/usr/bin/dnn_model_2_0_op11.onnx";
+    std::string mujoco_scene = KINECT_G1_SCENE_PATH;
+    std::string output = "mujoco-direct";
+    int port = 5556;
+    bool always_active = false;
+    bool fixed_base = false;
+    bool debug_skeleton = false;
+    bool verbose = false;
+    bool help = false;
+};
+
+Options ParseOptions(int argc, char** argv) {
+    Options options;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--model" && i + 1 < argc) options.body_model = argv[++i];
+        else if (arg == "--scene" && i + 1 < argc) options.mujoco_scene = argv[++i];
+        else if (arg == "--output" && i + 1 < argc) options.output = argv[++i];
+        else if (arg == "--port" && i + 1 < argc) options.port = std::stoi(argv[++i]);
+        else if (arg == "--always-active") options.always_active = true;
+        else if (arg == "--fixed-base") options.fixed_base = true;
+        else if (arg == "--debug-skeleton") options.debug_skeleton = true;
+        else if (arg == "--verbose") options.verbose = true;
+        else if (arg == "--help") options.help = true;
+        else throw std::runtime_error(
+            "usage: kinect_teleoperate [--output mujoco-direct|sonic-v1] [--fixed-base] "
+            "[--always-active] [--debug-skeleton] [--verbose] [--port 5556] [--model PATH] [--scene PATH]");
+    }
+    if (options.output != "mujoco-direct" && options.output != "sonic-v1")
+        throw std::runtime_error("--output must be mujoco-direct or sonic-v1");
+    if (options.port < 1 || options.port > 65535) throw std::runtime_error("--port must be 1..65535");
+    return options;
+}
+
 int main(int argc, char** argv)
 {
-
-    #if Control_G1
-    const char* model_path = "../src/unitree_g1/scene.xml";
-    #endif
-    #if Control_H1
-    const char* model_path = "../src/unitree_h1/mjcf/scene.xml"; 
-    #endif
-
-    char error[1000];
-    m = mj_loadXML(model_path, nullptr, error, 1000);
-    if (m == nullptr) {
-        std::cerr << "Failed to load MuJoCo model '" << model_path << "': " << error << std::endl;
+    Options options;
+    try {
+        options = ParseOptions(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << std::endl;
         return 1;
     }
-    d = mj_makeData(m);
-    mj_resetData(m, d);
+    if (options.help) {
+        std::cout << "usage: kinect_teleoperate [--output mujoco-direct|sonic-v1] [--fixed-base] "
+                     "[--always-active] [--debug-skeleton] [--verbose] [--port 5556] [--model PATH] [--scene PATH]\n";
+        return 0;
+    }
+    if (!std::filesystem::is_regular_file(options.body_model)) {
+        std::cerr << "Body Tracking model not found: " << options.body_model << std::endl;
+        return 1;
+    }
+    if (options.output == "mujoco-direct" && !std::filesystem::is_regular_file(options.mujoco_scene)) {
+        std::cerr << "MuJoCo scene not found: " << options.mujoco_scene << std::endl;
+        return 1;
+    }
+    #if Real_Control
+    if (options.always_active) {
+        std::cerr << "--always-active is available only when Real_Control=false" << std::endl;
+        return 1;
+    }
+    #endif
+    s_bodyTrackingModelPath = std::filesystem::absolute(options.body_model).string();
+    s_alwaysActive = options.always_active;
+    s_output = options.output;
+    s_sonicPort = options.port;
+    s_debugSkeleton = options.debug_skeleton;
+    s_verbose = options.verbose;
+
+    if (s_output == "mujoco-direct") {
+        char error[1000];
+        m = mj_loadXML(options.mujoco_scene.c_str(), nullptr, error, 1000);
+        if (!m) {
+            std::cerr << "Failed to load MuJoCo model '" << options.mujoco_scene << "': " << error << std::endl;
+            return 1;
+        }
+        d = mj_makeData(m);
+        if (!d) { mj_deleteModel(m); return 1; }
+        mj_resetData(m, d);
+        std::cout << "mujoco_scene=" << std::filesystem::absolute(options.mujoco_scene)
+                  << " actuators=" << m->nu << " fixed_base=yes Real_Control=false Enable_Torso=false\n";
+    } else {
+        std::cout << "sonic_protocol=1 encode_mode=0 bind=127.0.0.1:" << s_sonicPort
+                  << " Real_Control=false hands=false\n";
+    }
 
     std::thread kinect_thread(Main_loop);
-    while (!s_kinectReady || !s_kinectRenderReady)
+    while (s_isRunning && (!s_kinectReady || !s_kinectRenderReady))
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    std::thread control_thread(Control_loop);
-    std::thread mujocoRender_thread(MujocoRender_loop);
+    if (!s_isRunning) {
+        kinect_thread.join();
+        if (d) mj_deleteData(d);
+        if (m) mj_deleteModel(m);
+        return 1;
+    }
+    std::thread control_thread(FullBodyControl_loop);
+    std::thread mujocoRender_thread;
+    if (s_output == "mujoco-direct") mujocoRender_thread=std::thread(MujocoRender_loop);
 
     kinect_thread.join();
     control_thread.join();
-    mujocoRender_thread.join();
+    if (mujocoRender_thread.joinable()) mujocoRender_thread.join();
+
+    if (d) mj_deleteData(d);
+    if (m) mj_deleteModel(m);
 
     return 0;
 }

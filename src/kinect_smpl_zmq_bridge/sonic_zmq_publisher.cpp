@@ -63,17 +63,17 @@ SonicZmqPublisher::~SonicZmqPublisher() {
     if (context_) zmq_ctx_term(context_);
 }
 
-void SonicZmqPublisher::publish_pose(const SonicPoseFrame& frame, std::uint64_t frame_index,
+bool SonicZmqPublisher::publish_pose(const SonicPoseFrame& frame, std::uint64_t frame_index,
                                      std::uint64_t epoch, std::uint64_t sequence,
                                      std::uint64_t source_timestamp_us) {
-    for (float value : frame.smpl_joints) if (!std::isfinite(value)) return;
-    for (float value : frame.smpl_pose) if (!std::isfinite(value)) return;
+    for (float value : frame.smpl_joints) if (!std::isfinite(value)) return false;
+    for (float value : frame.smpl_pose) if (!std::isfinite(value)) return false;
     float quat_norm2 = 0.0f;
     for (float value : frame.body_quat_w) {
-        if (!std::isfinite(value)) return;
+        if (!std::isfinite(value)) return false;
         quat_norm2 += value * value;
     }
-    if (quat_norm2 < 0.25f || quat_norm2 > 4.0f) return;
+    if (quat_norm2 < 0.25f || quat_norm2 > 4.0f) return false;
     std::array<float, 29> joint_pos{};
     std::array<float, 29> joint_vel{};
     const std::int64_t index = static_cast<std::int64_t>(frame_index);
@@ -108,6 +108,13 @@ void SonicZmqPublisher::publish_pose(const SonicPoseFrame& frame, std::uint64_t 
     append(message, &source_timestamp_us, 1);
     append(message, &sent_unix_us, 1);
     send(message, socket_);
+    return true;
+}
+
+bool SonicZmqPublisher::publish_pose(const BridgeResult& result, std::uint64_t frame_index) {
+    if (!result.publish || !result.dispatch) return false;
+    return publish_pose(result.pose, frame_index, result.epoch, result.sequence,
+                        result.source_timestamp_us);
 }
 
 void SonicZmqPublisher::publish_planner(const SonicPoseFrame& frame, std::uint64_t epoch,

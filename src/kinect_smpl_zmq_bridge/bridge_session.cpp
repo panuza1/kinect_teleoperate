@@ -455,6 +455,12 @@ bool BridgeSession::request_arm() {
     return true;
 }
 
+bool AutoRearmOnReady::apply(BridgeSession& session, BridgeResult& result) {
+    if (!enabled_ || result.state != BridgeState::READY || session.health().armed) return false;
+    result.dispatch = session.request_arm();
+    return result.dispatch;
+}
+
 void BridgeSession::request_stop() { armed_ = false; planner_ = false; }
 
 void BridgeSession::reset_epoch() {
