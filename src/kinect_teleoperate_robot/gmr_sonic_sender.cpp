@@ -3,11 +3,11 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -53,13 +53,16 @@ int main(int argc,char** argv) {
     for(int i=0;i<total;++i,timestamp+=33333) {
         const double phase=i<15?0.0:2*pi*(i-15)/90.0;
         if(const auto reference=gmr.update(sample(timestamp,phase))) {
-            assert(sonic.publish_command(true,false));
-            assert(sonic.publish(*reference,static_cast<std::int64_t>(frame++)));
+            if(!sonic.publish_command(true,false) ||
+               !sonic.publish(*reference,static_cast<std::int64_t>(frame++)))
+                throw std::runtime_error("failed to publish SONIC Protocol v1 frame");
             ++published;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
-    assert(published>=static_cast<std::uint64_t>(seconds*25));
-    assert(sonic.publish_command(false,true));
+    if(published<static_cast<std::uint64_t>(seconds*25))
+        throw std::runtime_error("insufficient GMR frames");
+    if(!sonic.publish_command(false,true))
+        throw std::runtime_error("failed to publish SONIC stop command");
     std::cout << "gmr_sonic_frames=" << published << " stopped=yes\n";
 }

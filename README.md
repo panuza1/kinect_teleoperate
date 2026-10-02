@@ -374,7 +374,14 @@ cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
 ./build/kinect_teleoperate --retargeter gmr --output mujoco-direct --fixed-base --always-active
 ```
 
-SONIC floating-base MuJoCo simulator (terminal 1):
+GMR bridge (terminal 1):
+
+```bash
+cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
+/home/panu/miniconda3/envs/gmr/bin/python tools/kinect_gmr_bridge.py --port 5558
+```
+
+SONIC floating-base MuJoCo simulator (terminal 2):
 
 ```bash
 cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/GR00T-WholeBodyControl
@@ -383,7 +390,7 @@ SONIC_SIM_METRICS=1 PYTHONPATH=.:external_dependencies/unitree_sdk2_python \
   --interface sim --dds-domain 42 --no-enable-onscreen
 ```
 
-SONIC Protocol v1 receiver and released policy (terminal 2):
+SONIC Protocol v1 receiver and released policy (terminal 3):
 
 ```bash
 cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/GR00T-WholeBodyControl/gear_sonic_deploy
@@ -396,18 +403,21 @@ source scripts/setup_env.sh
   --disable-crc-check --no-hand-publish
 ```
 
-Kinect Protocol v1 publisher (terminal 3):
+Kinect Protocol v1 publisher (terminal 4):
 
 ```bash
 cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
 ./build/kinect_teleoperate --retargeter gmr --output sonic-v1 --always-active \
-  --debug-skeleton --port 5556
+  --debug-skeleton --port 5556 --gmr-port 5558
 ```
 
 The publisher uses topic `pose`, protocol version 1, encode mode 0, little-endian
 float32 `[1,29]` `joint_pos`/`joint_vel`, and loopback only. Start the simulator
-and SONIC first. Live Kinect PASS requires a connected Femto Bolt; without it,
-only the hardware-free tests above are evidence.
+and SONIC first. While active it repeats the idempotent start command because
+Protocol v1 has no acknowledgement and a late subscriber can miss an initial
+PUB message. The Femto Bolt/CUDA tracker starts successfully, but the latest
+unattended check had no person in view, so live calibration and motion remain
+unvalidated; only the hardware-free results are PASS evidence.
 
 Legacy comparison only:
 

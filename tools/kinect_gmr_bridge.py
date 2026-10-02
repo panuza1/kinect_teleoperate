@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import math
-import os
 import pathlib
 import struct
 import sys

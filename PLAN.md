@@ -10,7 +10,7 @@ Status values are `DONE`, `BLOCKED`, or `NOT RUN`.
 | 4 | Generate filtered, limited G1 qpos/qvel in the shared SONIC order | DONE |
 | 5 | Preserve fixed-base MuJoCo and SONIC Protocol v1 output modes | DONE |
 | 6 | Add synthetic semantic GMR and legacy-comparison tests | DONE |
-| 7 | Build and run hardware-free validation | DONE |
-| 8 | Validate GMR visually with a Femto Bolt before rerunning SONIC | BLOCKED: no Femto Bolt is connected |
+| 7 | Build and run hardware-free validation | DONE: 9/9 Kinect tests plus 18.7 s synthetic GMR -> Protocol v1 -> released SONIC -> floating-base MuJoCo, zero simulator resets and zero hand commands |
+| 8 | Validate GMR visually with a tracked person before using live Kinect data with SONIC | BLOCKED: Femto Bolt/GPU tracking starts at 22-24 FPS, but the unattended run had no person in view (all 19 joints reported confidence NONE), so calibration and visual motion checks could not run |
 
 GMR commit `bb1bbe40774794fceb2a7c579a3464a28e68c844` is installed from the sibling `GMR/` checkout. Both output modes share one `G1Reference`. Direct mode stops at visualization; SONIC owns dynamic balance. The old Euler mapping remains diagnostic only.

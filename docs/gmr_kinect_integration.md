@@ -133,11 +133,29 @@ unbounded velocity.
 - `--output mujoco-direct` pins the SONIC G1 free root and applies named qpos;
   it is a kinematic mapping viewer, not a balance controller.
 - `--output sonic-v1` reuses the joint Protocol v1 publisher; SONIC remains the
-  balance controller and no SMPL fields are emitted.
+  balance controller and no SMPL fields are emitted. The idempotent start
+  command is sent with every active pose because Protocol v1 has no command
+  acknowledgement and a subscriber may still be joining when the first pose
+  is published.
 
 Synthetic tests cover neutral, T-pose, unilateral arm raises, elbow bend,
 torso yaw, hip flexion/abduction, knee bend, single-leg reference, confidence
 hold/stale behavior, limits, finite velocity, and a real C++/Python bridge
 comparison with the legacy retargeter. This is software evidence only. A
-physical Femto Bolt session is still required before claiming that the new
-mapping fixes live motion.
+tracked-person Femto Bolt session is still required before claiming that the
+new mapping fixes live motion.
+
+The connected Femto Bolt and CUDA body tracker were started with the fixed-base
+command and sustained roughly 22-24 capture FPS, but the unattended check had
+no tracked person in view: all 19 joints remained at confidence NONE. Therefore
+neutral calibration, live GMR solves, limb-direction checks, and visual
+coherence are not yet validated.
+
+The synthetic GMR publisher was also exercised through the unmodified released
+SONIC encoder/decoder/policy and floating-base simulator on loopback DDS domain
+42. SONIC entered streamed G1 mode, consumed 465 GMR-derived Protocol v1
+frames, ran 18.7 simulated seconds, exited on the stop command, and reported no
+simulator reset or hand command. The policy's observe-only simulator safety
+diagnostics did report some generated motor commands outside nominal limits;
+this is not a live-hardware safety approval. No policy file or weight was
+changed.

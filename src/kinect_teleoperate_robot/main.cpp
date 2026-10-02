@@ -631,7 +631,7 @@ void FullBodyControl_loop() {
 
     StartEndPoseDetector pose_detector;
     auto metric_start=steady_clock::now();
-    std::uint64_t consumed=0, frames=0, sent=0, active_frames=0;
+    std::uint64_t consumed=0, frames=0, sent=0;
     bool was_active=false;
     while (s_isRunning) {
         G1Reference reference;
@@ -653,7 +653,6 @@ void FullBodyControl_loop() {
             if (publisher) {
                 publisher->publish_command(true,false);
                 if (publisher->publish(reference,static_cast<std::int64_t>(sequence))) ++sent;
-                ++active_frames;
             } else {
                 std::scoped_lock lock(s_mujocoMutex);
                 for (int i=0;i<std::min(7,m->nq);++i) d->qpos[i]=fixed_base[i];
@@ -663,7 +662,6 @@ void FullBodyControl_loop() {
             }
         } else if (publisher && was_active) {
             publisher->publish_command(false,true);
-            active_frames=0;
         }
         was_active=active;
         consumed=sequence;
