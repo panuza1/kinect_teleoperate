@@ -1093,3 +1093,40 @@ and five-motion trace
 No SONIC,
 policy, bridge, retargeting, SMPL, ZMQ, Isaac Lab, hand, or real-G1 code was
 changed. This scoped Kinect → stock SONIC → G1 simulation validation passes.
+
+## Kinect-specific GMR orientation profile — 2026-10-03
+
+**Classification:** `KINECT_HARDWARE_REQUIRED` for the final visual gate;
+implementation and captured-live replay are complete. A project-local
+`config/kinect_to_g1.json` is registered as GMR source `kinect`, leaving the
+upstream `xsens_mvn_to_g1.json` unchanged. Pelvis, torso and lower-body
+objectives remain upstream-compatible. Both wrists use position weight 50 and
+a reduced weight-2 neutral source orientation instead of raw K4ABT wrist
+quaternions. Position-only wrists caused a 21-sample joint-limit run; the
+neutral stabilizer reduced the longest run to one sample. Upper-arm/forearm
+orientation weights were tested at zero and several reduced levels; the
+selected 2/1 weights retained arm-frame guidance with position weights 5/20
+in the primary table.
+
+The deterministic 300-block captured-live replay compared the original full
+orientation profile, upper-limb position-only, and the final Kinect profile.
+For A/B/C respectively: position RMS was 8.73/8.32/8.47 cm; shoulder magnitude
+0.820/0.963/0.901 rad; wrist displacement 2.012/0.246/0.594 rad; joint-limit
+saturation 3.09/1.44/0.05%; qpos discontinuity median 1.648/0.538/0.629 rad,
+p90 2.916/1.579/1.603 rad, and maximum 4.293/2.733/2.631 rad. Front/side
+fixed-base rendering of the captured neutral, T-pose, unilateral side,
+unilateral forward, both elbow-bend and return-neutral frames was visually
+coherent. This is captured-live replay evidence, not the required fresh live
+visual pass. Profile SHA-256 is
+`8b690f7b44a5a04ed0b6f4fe344824f2ea223fbb6d04513ee6bc8289d511414d`;
+input log hashes are `c14896d76eb90b1075a8400780963b0221258f6c47819b2282717bb1bf73b1a8`
+and `584fc6b000d4295086ef898e797567e263648d92c5cc535aca38fcf8ab7a77e9`.
+
+`tools/gmr_adapter_test.py` now injects a 180-degree raw wrist quaternion spike
+and verifies it produces no G1 wrist/shoulder jump. The exact requested
+diagnostic passes, the project build succeeds, and all 9 `kinect_*` CTests
+pass. A fresh Femto Bolt → GMR → fixed-base MuJoCo attempt started CUDA body
+tracking at 21-22 FPS but observed no person (all 19 confidences NONE), so the
+interactive visual gate remains **BLOCKED**. SONIC and real G1 were not
+started. Next: rerun the two fixed-base commands with an operator performing
+the nine labelled poses; only then can Phase 8 be marked DONE and SONIC resume.

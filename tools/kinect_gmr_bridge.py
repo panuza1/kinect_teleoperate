@@ -186,10 +186,20 @@ class KinectToGMRAdapter:
 
 
 class GMRPipeline:
-    def __init__(self, gmr_root: pathlib.Path, calibration_frames: int = 15, smoothing: float = 0.45):
+    def __init__(self, gmr_root: pathlib.Path, calibration_frames: int = 15, smoothing: float = 0.45,
+                 profile: str = "kinect_g1"):
         sys.path.insert(0, str(gmr_root))
         import mujoco
         from general_motion_retargeting import GeneralMotionRetargeting
+        from general_motion_retargeting.params import IK_CONFIG_DICT
+
+        if profile not in ("kinect_g1", "xsens_mvn"):
+            raise ValueError(f"unknown GMR profile: {profile}")
+        self.profile = profile
+        self.gmr_source = "kinect" if profile == "kinect_g1" else "xsens_mvn"
+        if self.gmr_source == "kinect":
+            config = pathlib.Path(__file__).resolve().parents[1] / "config/kinect_to_g1.json"
+            IK_CONFIG_DICT["kinect"] = {"unitree_g1": config}
 
         self.mujoco = mujoco
         self.GMR = GeneralMotionRetargeting
@@ -202,10 +212,48 @@ class GMRPipeline:
         self.lower = self.upper = None
         self.reference_quats: dict[str, np.ndarray] = {}
 
+    def dump_neutral(self, joints: dict[str, Joint], adapted: AdapterResult, qpos: np.ndarray) -> None:
+        adapter = self.adapter
+        basis = adapter.world_basis
+        print("gmr_neutral_dump begin", flush=True)
+        print(f"calibration_frames={len(adapter.calibration_samples)} origin_m={adapter.origin.tolist()} "
+              f"actual_human_height_m={adapter.actual_human_height:.4f}", flush=True)
+        print(f"anatomical_basis_columns_forward_left_up={basis.tolist()} "
+              f"orthogonality_error={np.linalg.norm(basis.T @ basis - np.eye(3)):.3g} "
+              f"determinant={np.linalg.det(basis):.6f}", flush=True)
+
+        for name, joint in joints.items():
+            world = adapter._world_joint(joint)
+            axes = Rotation.from_quat(world.orientation_wxyz, scalar_first=True).as_matrix()
+            print(f"raw_joint={name} confidence={joint.confidence} position_mm={joint.position_mm.tolist()} "
+                  f"orientation_k4_wxyz={joint.orientation_wxyz.tolist()} "
+                  f"position_m_after_camera_basis={world.position_mm.tolist()} "
+                  f"orientation_axes_after_camera_basis={axes.tolist()}", flush=True)
+
+        for name in GMR_TARGETS:
+            neutral = adapter.neutral[name]
+            neutral_axes = Rotation.from_quat(neutral.orientation_wxyz, scalar_first=True).as_matrix()
+            target_pos, target_quat = adapted.human_frame[name]
+            target_axes = Rotation.from_quat(target_quat, scalar_first=True).as_matrix()
+            scaled_pos, scaled_quat = self.retargeter.scaled_human_data[name]
+            scaled_axes = Rotation.from_quat(scaled_quat, scalar_first=True).as_matrix()
+            print(f"target={name} kinect_neutral_position_m={neutral.position_mm.tolist()} "
+                  f"kinect_neutral_world_axes={neutral_axes.tolist()} "
+                  f"gmr_reference_wxyz={self.reference_quats[name].tolist()} "
+                  f"gmr_input_position_m={target_pos.tolist()} gmr_input_wxyz={target_quat.tolist()} "
+                  f"gmr_input_axes={target_axes.tolist()} scaled_position_m={scaled_pos.tolist()} "
+                  f"scaled_wxyz={scaled_quat.tolist()} scaled_axes={scaled_axes.tolist()}", flush=True)
+
+        for index, name in enumerate(G1_JOINT_NAMES):
+            neutral_qpos = float(np.clip(SONIC_NEUTRAL[index], self.lower[index], self.upper[index]))
+            print(f"qpos_delta joint={name} neutral_qpos={neutral_qpos:.6f} "
+                  f"first_live_qpos={qpos[index]:.6f} delta={qpos[index] - neutral_qpos:+.6f}", flush=True)
+        print("gmr_neutral_dump end", flush=True)
+
     def _start_gmr(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             self.retargeter = self.GMR(
-                src_human="xsens_mvn", tgt_robot="unitree_g1",
+                src_human=self.gmr_source, tgt_robot="unitree_g1",
                 actual_human_height=self.adapter.actual_human_height,
                 solver="daqp", damping=1.0, verbose=False, use_velocity_limit=True,
             )
@@ -234,10 +282,16 @@ class GMRPipeline:
         data = self.retargeter.configuration.data
         for robot_body, entry in self.retargeter.ik_match_table1.items():
             human_body = entry[0]
+            self.retargeter.pos_offsets1.setdefault(
+                human_body, np.asarray(entry[3]) - self.retargeter.ground
+            )
+            self.retargeter.rot_offsets1.setdefault(
+                human_body, Rotation.from_quat(entry[4], scalar_first=True)
+            )
             body_id = self.mujoco.mj_name2id(model, self.mujoco.mjtObj.mjOBJ_BODY, robot_body)
             robot_rotation = Rotation.from_quat(data.xquat[body_id], scalar_first=True)
             self.reference_quats[human_body] = (
-                robot_rotation * self.retargeter.rot_offsets1[human_body].inv()
+                robot_rotation * Rotation.from_quat(entry[4], scalar_first=True).inv()
             ).as_quat(scalar_first=True)
 
     def update(self, joints: dict[str, Joint], timestamp_us: int):
@@ -249,6 +303,8 @@ class GMRPipeline:
 
         for body_name, (position, delta_quat) in adapted.human_frame.items():
             orientation = Rotation.from_quat(delta_quat, scalar_first=True)
+            if self.gmr_source == "kinect" and body_name in ("Left_Hand", "Right_Hand"):
+                orientation = Rotation.identity()
             reference = Rotation.from_quat(self.reference_quats[body_name], scalar_first=True)
             adapted.human_frame[body_name] = (position, (orientation * reference).as_quat(scalar_first=True))
 
@@ -308,21 +364,29 @@ def main() -> int:
     parser.add_argument("--gmr-root", type=pathlib.Path,
                         default=pathlib.Path(__file__).resolve().parents[2] / "GMR")
     parser.add_argument("--calibration-frames", type=int, default=15)
-    parser.add_argument("--smoothing", type=float, default=0.45)
+    parser.add_argument("--smoothing", type=float, default=0.20)   
+    parser.add_argument("--profile", choices=("kinect_g1", "xsens_mvn"), default="kinect_g1")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--dump-neutral", action="store_true",
+                        help="print raw pose, calibration, GMR targets and first solved qpos once")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be 1..65535")
     if not (args.gmr_root / "general_motion_retargeting").is_dir():
         parser.error(f"GMR checkout not found: {args.gmr_root}")
 
-    pipeline = GMRPipeline(args.gmr_root, args.calibration_frames, args.smoothing)
+    pipeline = GMRPipeline(args.gmr_root, args.calibration_frames, args.smoothing, args.profile)
     context = zmq.Context()
     socket = context.socket(zmq.REP)
     socket.setsockopt(zmq.LINGER, 0)
     socket.bind(f"tcp://127.0.0.1:{args.port}")
-    print(f"gmr_bridge=ready source={args.gmr_root} commit=bb1bbe40774794fceb2a7c579a3464a28e68c844 port={args.port}", flush=True)
+    print(f"gmr_bridge=ready dependency={args.gmr_root} commit=bb1bbe40774794fceb2a7c579a3464a28e68c844 port={args.port}", flush=True)
+    print(f"gmr_source={pipeline.gmr_source}", flush=True)
+    print(f"gmr_profile={pipeline.profile}", flush=True)
+    print("upper_limb_orientation=position_dominant", flush=True)
+    print("wrist_orientation=neutral_low_weight", flush=True)
     last_verbose = 0.0
+    neutral_dumped = False
     try:
         while True:
             message = socket.recv()
@@ -330,6 +394,9 @@ def main() -> int:
                 timestamp_us, _, joints = decode_request(message)
                 values, adapted, solve_ms = pipeline.update(joints, timestamp_us)
                 socket.send(response(2 if values is not None else 1, timestamp_us, adapted, solve_ms, values))
+                if args.dump_neutral and values is not None and not neutral_dumped:
+                    pipeline.dump_neutral(joints, adapted, values[0])
+                    neutral_dumped = True
                 if args.verbose and values is not None and time.monotonic() - last_verbose >= 1.0:
                     for body_name, (human_pos, human_quat) in adapted.human_frame.items():
                         gmr_pos, gmr_quat = pipeline.retargeter.scaled_human_data[body_name]

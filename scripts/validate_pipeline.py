@@ -72,7 +72,7 @@ def load_config(path: Path) -> dict[str, Any]:
         raise fail("telemetry_path must be a string")
     if not isinstance(value.get("calibration_required", False), bool):
         raise fail("calibration_required must be boolean")
-    if value.get("calibration_required") and not value.get("calibration_path"):
+    if value.get("calibration_required") and not value.get("calibration_path"): 
         raise fail("calibration_required needs calibration_path")
     for section, allowed in (("selection", SELECTION_KEYS), ("timeouts", TIMEOUT_KEYS),
                              ("locomotion", LOCOMOTION_KEYS)):
@@ -508,4 +508,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main()) 
+
+

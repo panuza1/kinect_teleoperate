@@ -72,25 +72,40 @@ class Scenario:
 def main():
     gmr_root = pathlib.Path(__file__).resolve().parents[2] / "GMR"
     scenario = Scenario(gmr_root)
-    assert np.max(np.abs(scenario.neutral - SONIC_NEUTRAL)) < 0.35
+    for index, table in enumerate((scenario.pipeline.retargeter.ik_match_table1,
+                                   scenario.pipeline.retargeter.ik_match_table2), start=1):
+        weights = {entry[0]: entry[1:3] for entry in table.values()}
+        assert weights["Left_UpperArm"][1] == weights["Right_UpperArm"][1] == 2
+        assert weights["Left_Forearm"][1] == weights["Right_Forearm"][1] == 1
+        assert weights["Left_Hand"][1] == weights["Right_Hand"][1] == (0 if index == 1 else 2)
+    elbow_indices = [INDEX["left_elbow_joint"], INDEX["right_elbow_joint"]]
+    non_elbows = np.ones(29, dtype=bool)
+    non_elbows[elbow_indices] = False
+    assert np.max(np.abs(scenario.neutral[non_elbows] - SONIC_NEUTRAL[non_elbows])) < 0.35
+    assert np.all((scenario.neutral[elbow_indices] > .5) & (scenario.neutral[elbow_indices] < 1.6))
     assert np.count_nonzero(np.isclose(scenario.neutral, scenario.pipeline.lower, atol=1e-4)) == 0
     assert np.count_nonzero(np.isclose(scenario.neutral, scenario.pipeline.upper, atol=1e-4)) == 0
 
-    qy = camera_quaternion(1, .7)
-    delta, _ = scenario.delta({name: qy for name in ("LeftShoulder", "LeftElbow", "LeftWrist")})
-    assert delta[INDEX["left_shoulder_pitch_joint"]] > .2
+    left_forward = dict(POSE)
+    left_forward.update({"LeftElbow": (.3, .25, 1.35), "LeftWrist": (.6, .25, 1.35)})
+    delta, _ = scenario.delta({}, left_forward)
+    assert abs(delta[INDEX["left_shoulder_pitch_joint"]]) > .2
     assert abs(delta[INDEX["left_shoulder_pitch_joint"]]) > abs(delta[INDEX["right_shoulder_pitch_joint"]])
 
-    delta, _ = scenario.delta({name: qy for name in ("RightShoulder", "RightElbow", "RightWrist")})
-    assert delta[INDEX["right_shoulder_pitch_joint"]] > .2
+    right_forward = dict(POSE)
+    right_forward.update({"RightElbow": (.3, -.25, 1.35), "RightWrist": (.6, -.25, 1.35)})
+    delta, _ = scenario.delta({}, right_forward)
+    assert abs(delta[INDEX["right_shoulder_pitch_joint"]]) > .2
     assert abs(delta[INDEX["right_shoulder_pitch_joint"]]) > abs(delta[INDEX["left_shoulder_pitch_joint"]])
 
-    left_side, right_side = camera_quaternion(0, .7), camera_quaternion(0, -.7)
-    delta, _ = scenario.delta({name: left_side for name in ("LeftShoulder", "LeftElbow", "LeftWrist")} |
-                              {name: right_side for name in ("RightShoulder", "RightElbow", "RightWrist")})
+    side = dict(POSE)
+    side.update({"LeftElbow": (0, .5, 1.35), "LeftWrist": (0, .8, 1.35),
+                 "RightElbow": (0, -.5, 1.35), "RightWrist": (0, -.8, 1.35)})
+    delta, _ = scenario.delta({}, side)
     assert delta[INDEX["left_shoulder_roll_joint"]] > .2
     assert delta[INDEX["right_shoulder_roll_joint"]] < -.2
 
+    qy = camera_quaternion(1, .7)
     delta, _ = scenario.delta({name: qy for name in ("LeftElbow", "LeftWrist")})
     assert delta[INDEX["left_elbow_joint"]] > .25
     delta, _ = scenario.delta({name: qy for name in ("RightElbow", "RightWrist")})
@@ -127,6 +142,21 @@ def main():
     scenario.timestamp += 200_000
     result, adapted, _ = scenario.pipeline.update(frame(confidence={"LeftFoot": 0}), scenario.timestamp)
     assert result is not None and adapted.stale == 1
+
+    # Raw wrist quaternion spikes must not move G1 wrists or leak into shoulders.
+    baseline = Scenario(gmr_root)
+    spiked = Scenario(gmr_root)
+    baseline_qpos = baseline.run(frame(), 12)[0]
+    wrist_spike = camera_quaternion(0, np.pi)
+    spiked_qpos = spiked.run(frame(rotations={
+        "LeftWrist": wrist_spike, "RightWrist": wrist_spike,
+    }), 12)[0]
+    affected = [INDEX[f"{side}_{joint}_{axis}_joint"]
+                for side in ("left", "right")
+                for joint, axes in (("shoulder", ("pitch", "roll", "yaw")),
+                                    ("wrist", ("roll", "pitch", "yaw")))
+                for axis in axes]
+    assert np.max(np.abs(spiked_qpos[affected] - baseline_qpos[affected])) < 1e-6
 
     print("GMR Kinect adapter semantic tests passed")
 

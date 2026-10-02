@@ -356,7 +356,7 @@ Kinect full-body diagnostics:
 
 ```bash
 cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
-/home/panu/miniconda3/envs/gmr/bin/python tools/kinect_gmr_bridge.py --port 5558 --verbose
+/home/panu/miniconda3/envs/gmr/bin/python tools/kinect_gmr_bridge.py --port 5558 --profile kinect_g1 --verbose
 ```
 
 In a second terminal:
@@ -378,7 +378,7 @@ GMR bridge (terminal 1):
 
 ```bash
 cd ~/Documents/fibo/project_humanoid/g1_inspire_workspace/kinect_teleoperate
-/home/panu/miniconda3/envs/gmr/bin/python tools/kinect_gmr_bridge.py --port 5558
+/home/panu/miniconda3/envs/gmr/bin/python tools/kinect_gmr_bridge.py --port 5558 --profile kinect_g1
 ```
 
 SONIC floating-base MuJoCo simulator (terminal 2):

@@ -8,17 +8,19 @@ The dependency is the official `YanjieZe/GMR` repository at sibling path
 
 The inspected upstream contract is:
 
-- `GeneralMotionRetargeting(src_human="xsens_mvn", tgt_robot="unitree_g1")`
+- `GeneralMotionRetargeting(src_human="kinect", tgt_robot="unitree_g1")`, with
+  the project-local Kinect profile registered at runtime;
 - one human frame is a dictionary of global body names to `(position,
   orientation)`;
 - positions are metres and orientations are normalized scalar-first `wxyz`
   quaternions;
-- upstream applies its official per-body scale table, target offsets, weights,
+- upstream applies the derived per-body scale table, target offsets, weights,
   joint configuration limits, and Mink optimization;
 - `retarget()` returns MuJoCo qpos: free-root translation `[0:3]`, root
   quaternion `[3:7]`, then the 29 G1 joints;
-- the GMR model is `assets/unitree_g1/g1_mocap_29dof.xml` and the official
-  target config is `general_motion_retargeting/ik_configs/xsens_mvn_to_g1.json`.
+- the GMR model is `assets/unitree_g1/g1_mocap_29dof.xml`; the project-local
+  target config is `config/kinect_to_g1.json`, derived from (without modifying)
+  upstream `general_motion_retargeting/ik_configs/xsens_mvn_to_g1.json`.
 
 `tools/kinect_gmr_bridge.py` is the Python-first adapter/service. The C++
 `KinectToGMRAdapter` sends raw timestamped K4ABT joints to it over a
@@ -74,6 +76,11 @@ R_source_current = Delta R R_source_neutral
 This preserves full quaternion coupling and removes K4ABT's joint-frame bias
 without unexplained Euler swaps.
 
+For `Left_Hand` and `Right_Hand`, the Kinect profile replaces the raw wrist
+delta with the calibrated neutral source orientation before GMR. Their
+orientation is held to a low-weight neutral target, so raw K4ABT wrist
+quaternion spikes cannot enter the IK objective; wrist positions remain active.
+
 ## Kinect to GMR target mapping
 
 All 19 requested K4ABT joints are converted, confidence-checked, cached, and
@@ -87,12 +94,12 @@ official G1 `xsens_mvn` configuration are submitted as optimization targets.
 | SpineChest | `Chest` | yes | yes | fresh, hold, then neutral fallback |
 | Neck | calibration/diagnostic | yes | yes | fresh, hold, stale |
 | Head | height/calibration/diagnostic | yes | yes | fresh, hold, stale |
-| LeftShoulder | `Left_UpperArm` | yes | yes | fresh, hold, then neutral fallback |
-| LeftElbow | `Left_Forearm` | yes | yes | fresh, hold, then neutral fallback |
-| LeftWrist | `Left_Hand` | yes | yes | fresh, hold, then neutral fallback |
-| RightShoulder | `Right_UpperArm` | yes | yes | fresh, hold, then neutral fallback |
-| RightElbow | `Right_Forearm` | yes | yes | fresh, hold, then neutral fallback |
-| RightWrist | `Right_Hand` | yes | yes | fresh, hold, then neutral fallback |
+| LeftShoulder | `Left_UpperArm` | yes (5) | reduced (2) | fresh, hold, then neutral fallback |
+| LeftElbow | `Left_Forearm` | yes (20) | reduced (1) | fresh, hold, then neutral fallback |
+| LeftWrist | `Left_Hand` | yes (50) | neutral, reduced (2) | fresh, hold, then neutral fallback |
+| RightShoulder | `Right_UpperArm` | yes (5) | reduced (2) | fresh, hold, then neutral fallback |
+| RightElbow | `Right_Forearm` | yes (20) | reduced (1) | fresh, hold, then neutral fallback |
+| RightWrist | `Right_Hand` | yes (50) | neutral, reduced (2) | fresh, hold, then neutral fallback |
 | LeftHip | `Left_UpperLeg` | yes | yes | fresh, hold, then neutral fallback |
 | LeftKnee | `Left_LowerLeg` | yes | yes | fresh, hold, then neutral fallback |
 | LeftAnkle | floor/calibration/diagnostic | yes | yes | fresh, hold, stale |
@@ -129,6 +136,10 @@ unbounded velocity.
 ## Modes and evidence boundary
 
 - `--retargeter gmr` is the default and requires the Python bridge.
+- The bridge defaults to `--profile kinect_g1` and prints `gmr_source=kinect`,
+  `gmr_profile=kinect_g1`, `upper_limb_orientation=position_dominant`, and
+  `wrist_orientation=neutral_low_weight` at startup. `--profile xsens_mvn`
+  exists only for the A/B diagnostic.
 - `--retargeter legacy` preserves the previous custom mapping for comparison.
 - `--output mujoco-direct` pins the SONIC G1 free root and applies named qpos;
   it is a kinematic mapping viewer, not a balance controller.
