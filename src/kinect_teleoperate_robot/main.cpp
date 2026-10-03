@@ -641,6 +641,7 @@ void FullBodyControl_loop() {
     auto metric_start=steady_clock::now();
     auto next_tx=metric_start;
     std::uint64_t consumed=0, sent=0, tx_frame=0, held=0, stale_events=0, ref_frames=0;
+    std::uint64_t start_count=0, stop_count=0;
     std::uint64_t last_tx_sequence=0;
     steady_clock::time_point arrival{};
     bool active=false, requested_active=false;
@@ -667,8 +668,10 @@ void FullBodyControl_loop() {
             const auto action=stream.tick(sequence,arrival,now,requested_active);
             active=stream.streaming();
             if (action.stale_event) ++stale_events;
-            if (action.send_start && !publisher->publish_command(true,false))
-                std::cerr << "failed to send SONIC start command\n";
+            if (action.send_start) {
+                if (publisher->publish_command(true,false)) ++start_count;
+                else std::cerr << "failed to send SONIC start command\n";
+            }
             if (action.publish_pose) {
                 G1Reference outgoing=reference;
                 if (action.held) outgoing.joint_vel.fill(0.0);
@@ -679,8 +682,8 @@ void FullBodyControl_loop() {
                 last_tx_sequence=sequence;
             }
             if (action.send_stop) {
-                if (!publisher->publish_command(false,true))
-                    std::cerr << "failed to send SONIC stop command\n";
+                if (publisher->publish_command(false,true)) ++stop_count;
+                else std::cerr << "failed to send SONIC stop command\n";
             }
         } else if (sequence && sequence != last_tx_sequence && requested_active) {
             {
@@ -704,6 +707,7 @@ void FullBodyControl_loop() {
                       << " reference_age_ms=" << (sequence ? duration<double,std::milli>(now-arrival).count() : -1.0)
                       << " fresh_sequence=" << sequence
                       << " held_tx=" << held << " stale_events=" << stale_events
+                      << " start_count=" << start_count << " stop_count=" << stop_count
                       << " publisher_state=" << (active?"STREAMING":"STOPPED")
                       << " active=" << (active?"yes":"no") << '\n';
             if (s_verbose) {

@@ -247,7 +247,7 @@ class GMRPipeline:
                   f"orientation_axes_after_camera_basis={axes.tolist()}", flush=True)
 
         for name in GMR_TARGETS:
-            neutral = adapter.neutral[name]
+            neutral = adapter.neutral[GMR_TARGETS[name]]
             neutral_axes = Rotation.from_quat(neutral.orientation_wxyz, scalar_first=True).as_matrix()
             target_pos, target_quat = adapted.human_frame[name]
             target_axes = Rotation.from_quat(target_quat, scalar_first=True).as_matrix()
@@ -483,7 +483,10 @@ def main() -> int:
                 values, adapted, solve_ms = pipeline.update(joints, timestamp_us)
                 socket.send(response(2 if values is not None else 1, timestamp_us, adapted, solve_ms, values))
                 if args.dump_neutral and values is not None and not neutral_dumped:
-                    pipeline.dump_neutral(joints, adapted, values[0])
+                    try:
+                        pipeline.dump_neutral(joints, adapted, values[0])
+                    except Exception as error:
+                        print(f"gmr_neutral_dump_error={error}", file=sys.stderr, flush=True)
                     neutral_dumped = True
                 if args.verbose and values is not None and time.monotonic() - last_verbose >= 1.0:
                     for body_name, (human_pos, human_quat) in adapted.human_frame.items():
