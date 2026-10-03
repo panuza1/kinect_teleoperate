@@ -13,7 +13,9 @@
 #include <thread>
 #include <mutex>
 #include <array>
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -36,6 +38,8 @@
 #include "KinectToG1Retargeter.hpp"
 #include "KinectToGMRAdapter.hpp"
 #include "SonicV1Publisher.hpp"
+#include "SonicV1StreamState.hpp"
+#include "KinectBodyDropoutState.hpp"
 
 using namespace std::chrono;
 
@@ -56,7 +60,11 @@ G1Reference s_g1Reference;
 RetargetStats s_retargetStats;
 GMRAdapterStats s_gmrStats;
 KinectSkeletonSample s_lastSkeleton;
+KinectBodyDropoutState s_bodyDropout;
+bool s_bodyDetected = false;
+double s_largestQposDelta = 0.0;
 std::uint64_t s_referenceSequence = 0;
+steady_clock::time_point s_referenceArrival{};
 std::mutex s_referenceMutex;
 
 #define Control_G1 true
@@ -631,8 +639,12 @@ void FullBodyControl_loop() {
 
     StartEndPoseDetector pose_detector;
     auto metric_start=steady_clock::now();
-    std::uint64_t consumed=0, frames=0, sent=0;
-    bool was_active=false;
+    auto next_tx=metric_start;
+    std::uint64_t consumed=0, sent=0, tx_frame=0, held=0, stale_events=0, ref_frames=0;
+    std::uint64_t last_tx_sequence=0;
+    steady_clock::time_point arrival{};
+    bool active=false, requested_active=false;
+    SonicV1StreamState stream;
     while (s_isRunning) {
         G1Reference reference;
         std::uint64_t sequence=0;
@@ -640,56 +652,94 @@ void FullBodyControl_loop() {
             std::scoped_lock lock(s_referenceMutex);
             reference=s_g1Reference;
             sequence=s_referenceSequence;
+            arrival=s_referenceArrival;
         }
-        if (!sequence || sequence==consumed) {
-            std::this_thread::sleep_for(milliseconds(5));
-            continue;
+        const auto now=steady_clock::now();
+        if (sequence && sequence != consumed) {
+            consumed=sequence;
+            ++ref_frames;
+            requested_active=s_alwaysActive || pose_detector.isStartEndPose(
+                reference.joint_pos[16],reference.joint_pos[15],reference.joint_pos[17],
+                reference.joint_pos[23],reference.joint_pos[22],reference.joint_pos[24],
+                reference.joint_pos[18],reference.joint_pos[25]);
         }
-        const bool active=s_alwaysActive || pose_detector.isStartEndPose(
-            reference.joint_pos[16],reference.joint_pos[15],reference.joint_pos[17],
-            reference.joint_pos[23],reference.joint_pos[22],reference.joint_pos[24],
-            reference.joint_pos[18],reference.joint_pos[25]);
-        if (active) {
-            if (publisher) {
-                publisher->publish_command(true,false);
-                if (publisher->publish(reference,static_cast<std::int64_t>(sequence))) ++sent;
-            } else {
+        if (publisher) {
+            const auto action=stream.tick(sequence,arrival,now,requested_active);
+            active=stream.streaming();
+            if (action.stale_event) ++stale_events;
+            if (action.send_start && !publisher->publish_command(true,false))
+                std::cerr << "failed to send SONIC start command\n";
+            if (action.publish_pose) {
+                G1Reference outgoing=reference;
+                if (action.held) outgoing.joint_vel.fill(0.0);
+                if (publisher->publish(outgoing,static_cast<std::int64_t>(++tx_frame))) {
+                    ++sent;
+                    if (action.held) ++held;
+                }
+                last_tx_sequence=sequence;
+            }
+            if (action.send_stop) {
+                if (!publisher->publish_command(false,true))
+                    std::cerr << "failed to send SONIC stop command\n";
+            }
+        } else if (sequence && sequence != last_tx_sequence && requested_active) {
+            {
                 std::scoped_lock lock(s_mujocoMutex);
                 for (int i=0;i<std::min(7,m->nq);++i) d->qpos[i]=fixed_base[i];
                 for (int i=0;i<m->nv;++i) d->qvel[i]=0;
                 for (std::size_t i=0;i<29;++i) d->qpos[qpos_address[i]]=reference.joint_pos[i];
                 mj_forward(m,d);
             }
-        } else if (publisher && was_active) {
-            publisher->publish_command(false,true);
+            last_tx_sequence=sequence;
+            active=requested_active;
         }
-        was_active=active;
-        consumed=sequence;
-        ++frames;
-        const auto now=steady_clock::now();
         const double elapsed=duration<double>(now-metric_start).count();
         if (elapsed>=1.0) {
             const auto limits=std::minmax_element(reference.joint_pos.begin(),reference.joint_pos.end());
             double vmax=0; for(double value:reference.joint_vel) vmax=std::max(vmax,std::abs(value));
-            std::cout << (s_retargeterMode=="gmr" ? "gmr_fps=" : "retarget_fps=") << frames/elapsed
+            std::cout << "gmr_ref_fps=" << ref_frames/elapsed
                       << " qpos_min=" << *limits.first
                       << " qpos_max=" << *limits.second << " qvel_max=" << vmax
                       << " output=" << s_output << " pose_tx_fps=" << sent/elapsed
+                      << " reference_age_ms=" << (sequence ? duration<double,std::milli>(now-arrival).count() : -1.0)
+                      << " fresh_sequence=" << sequence
+                      << " held_tx=" << held << " stale_events=" << stale_events
+                      << " publisher_state=" << (active?"STREAMING":"STOPPED")
                       << " active=" << (active?"yes":"no") << '\n';
             if (s_verbose) {
                 for (std::size_t i=0;i<29;++i)
                     std::cout << KinectToG1Retargeter::joint_names[i] << '=' << reference.joint_pos[i]
                               << " vel=" << reference.joint_vel[i] << '\n';
             }
-            frames=sent=0;
+            sent=held=ref_frames=0;
             metric_start=now;
         }
+        next_tx += SonicV1StreamState::tx_period;
+        if (now > next_tx + SonicV1StreamState::tx_period) next_tx=now+SonicV1StreamState::tx_period;
+        std::this_thread::sleep_until(next_tx);
     }
+    if (publisher && stream.streaming()) publisher->publish_command(false,true);
 }
 
 void ProcessFullBodySkeletonData(k4abt_frame_t bodyFrame) {
     const std::uint32_t count=k4abt_frame_get_num_bodies(bodyFrame);
-    if (!count) return;
+    if (!count) {
+        const auto now=steady_clock::now();
+        const auto timestamp=k4abt_frame_get_device_timestamp_usec(bodyFrame);
+        std::scoped_lock lock(s_referenceMutex);
+        s_bodyDetected=false;
+        s_gmrStats={};
+        s_retargetStats={};
+        s_lastSkeleton={};
+        s_lastSkeleton.timestamp_us=timestamp;
+        if (s_referenceSequence && s_bodyDropout.should_hold(now)) {
+            s_g1Reference.joint_vel.fill(0.0);
+            s_g1Reference.timestamp_us=timestamp;
+            ++s_referenceSequence;
+            s_referenceArrival=now;
+        }
+        return;
+    }
     std::uint32_t closest=0;
     float min_distance=std::numeric_limits<float>::max();
     k4abt_body_t body{};
@@ -729,12 +779,20 @@ void ProcessFullBodySkeletonData(k4abt_frame_t bodyFrame) {
         gmr_stats=s_gmrAdapter->stats();
     }
     std::scoped_lock lock(s_referenceMutex);
+    s_bodyDetected=true;
+    s_bodyDropout.body_seen(steady_clock::now());
     s_retargetStats=stats;
     s_gmrStats=gmr_stats;
     s_lastSkeleton=sample;
     if (reference) {
+        if (s_referenceSequence) {
+            for (std::size_t i=0;i<reference->joint_pos.size();++i)
+                s_largestQposDelta=std::max(s_largestQposDelta,
+                    std::abs(reference->joint_pos[i]-s_g1Reference.joint_pos[i]));
+        }
         s_g1Reference=*reference;
         ++s_referenceSequence;
+        s_referenceArrival=steady_clock::now();
     }
 }
 
@@ -876,6 +934,7 @@ void Main_loop(){
 
     auto metric_start = steady_clock::now();
     uint64_t tracking_frames = 0;
+    uint64_t camera_frames = 0;
     bool previous_body_detected = false;
     while (s_isRunning)
     {
@@ -883,6 +942,7 @@ void Main_loop(){
         k4a_wait_result_t getCaptureResult = k4a_device_get_capture(device, &sensorCapture, 100);
         if (getCaptureResult == K4A_WAIT_RESULT_SUCCEEDED)
         {
+            ++camera_frames;
             k4a_wait_result_t queueCaptureResult = k4abt_tracker_enqueue_capture(tracker, sensorCapture, 100);
             k4a_capture_release(sensorCapture);
             if (queueCaptureResult == K4A_WAIT_RESULT_FAILED)
@@ -923,34 +983,56 @@ void Main_loop(){
                 RetargetStats stats;
                 GMRAdapterStats gmr_stats;
                 KinectSkeletonSample skeleton;
+                bool body_detected=false;
+                std::uint64_t fresh_sequence=0;
+                double largest_qpos_delta=0.0;
                 {
                     std::scoped_lock lock(s_referenceMutex);
                     stats=s_retargetStats;
                     gmr_stats=s_gmrStats;
                     skeleton=s_lastSkeleton;
+                    body_detected=s_bodyDetected;
+                    fresh_sequence=s_referenceSequence;
+                    largest_qpos_delta=s_largestQposDelta;
+                    s_largestQposDelta=0.0;
                 }
-                std::cout << "kinect_fps=" << tracking_frames/elapsed << " body_id=" << skeleton.body_id;
+                std::size_t medium_high_targets=0, low_targets=0, held_targets=0, stale_targets=0;
                 if (s_retargeterMode == "gmr") {
-                    std::cout << " valid_targets=" << gmr_stats.valid_targets
-                              << " held_targets=" << gmr_stats.held_targets
-                              << " stale_targets=" << gmr_stats.stale_targets
-                              << " gmr_solve_ms=" << gmr_stats.solve_ms;
+                    medium_high_targets=gmr_stats.valid_targets;
+                    low_targets=gmr_stats.low_targets;
+                    held_targets=gmr_stats.held_targets;
+                    stale_targets=gmr_stats.stale_targets;
                 } else {
-                    std::cout << " valid_joints=" << stats.valid_joints << " held_joints=" << stats.held_joints
-                              << " stale_joints=" << stats.stale_joints;
+                    medium_high_targets=stats.valid_joints;
+                    held_targets=stats.held_joints;
+                    stale_targets=stats.stale_joints;
+                    for (const auto& joint : skeleton.joints) low_targets+=joint.confidence==1;
                 }
-                std::cout << " retargeter=" << s_retargeterMode << " output=" << s_output << '\n';
+                std::cout << "camera_fps=" << camera_frames/elapsed
+                          << " kinect_fps=" << tracking_frames/elapsed
+                          << " body_detected=" << (body_detected?"yes":"no")
+                          << " current_body_id=" << (body_detected?skeleton.body_id:0)
+                          << " medium_high_targets=" << medium_high_targets
+                          << " fresh_targets=" << medium_high_targets
+                          << " low_targets=" << low_targets
+                          << " held_targets=" << held_targets
+                          << " stale_targets=" << stale_targets
+                          << " fresh_sequence=" << fresh_sequence
+                          << " largest_qpos_delta=" << largest_qpos_delta
+                          << " retargeter=" << s_retargeterMode << " output=" << s_output << '\n';
                 if (s_debugSkeleton || s_verbose) {
                     for (std::size_t i=0;i<skeleton.joints.size();++i) {
                         const auto& joint=skeleton.joints[i];
-                        std::cout << "joint=" << i << " confidence=" << static_cast<int>(joint.confidence)
-                                  << " held=" << stats.held[i] << " stale=" << stats.stale[i];
+                        std::cout << "joint=" << i << " confidence=" << static_cast<int>(joint.confidence);
+                        if (s_retargeterMode == "legacy")
+                            std::cout << " held=" << stats.held[i] << " stale=" << stats.stale[i];
                         if (s_verbose) std::cout << " orientation_wxyz=" << joint.orientation_wxyz[0] << ','
                             << joint.orientation_wxyz[1] << ',' << joint.orientation_wxyz[2] << ',' << joint.orientation_wxyz[3];
                         std::cout << '\n';
                     }
                 }
                 tracking_frames = 0;
+                camera_frames = 0;
                 metric_start = now;
             }
         }

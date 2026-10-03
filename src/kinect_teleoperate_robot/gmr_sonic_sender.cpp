@@ -1,5 +1,6 @@
 #include "include/KinectToGMRAdapter.hpp"
 #include "include/SonicV1Publisher.hpp"
+#include "include/SonicV1StreamState.hpp"
 
 #include <algorithm>
 #include <array>
@@ -48,21 +49,46 @@ int main(int argc,char** argv) {
     const int seconds=argc>3?std::atoi(argv[3]):5;
     KinectToGMRAdapter gmr(gmr_port,500);
     SonicV1Publisher sonic(sonic_port);
-    std::uint64_t timestamp=1000000,frame=0,published=0;
-    const int total=std::max(1,seconds)*30+15;
-    for(int i=0;i<total;++i,timestamp+=33333) {
-        const double phase=i<15?0.0:2*pi*(i-15)/90.0;
-        if(const auto reference=gmr.update(sample(timestamp,phase))) {
-            if(!sonic.publish_command(true,false) ||
-               !sonic.publish(*reference,static_cast<std::int64_t>(frame++)))
-                throw std::runtime_error("failed to publish SONIC Protocol v1 frame");
-            ++published;
+    std::uint64_t timestamp=1000000,frame=0,sequence=0,ref_count=0,tx_count=0;
+    G1Reference latest{};
+    auto arrival=SonicV1StreamState::Clock::time_point{};
+    const auto start=SonicV1StreamState::Clock::now();
+    auto next_tx=start, next_ref=start;
+    SonicV1StreamState stream;
+    for(int i=0;i<std::max(1,seconds)*50;++i) {
+        const auto now=SonicV1StreamState::Clock::now();
+        if(now>=next_ref) {
+            const double phase=ref_count<15?0.0:2*pi*(ref_count-15)/60.0;
+            if(const auto reference=gmr.update(sample(timestamp,phase))) {
+                latest=*reference;
+                ++sequence;
+                ++ref_count;
+                arrival=SonicV1StreamState::Clock::now();
+            }
+            timestamp+=50000;
+            next_ref+=std::chrono::milliseconds(50);
+            if(now>next_ref+std::chrono::milliseconds(50)) next_ref=now+std::chrono::milliseconds(50);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        const auto action=stream.tick(sequence,arrival,now,true);
+        if(action.send_start && !sonic.publish_command(true,false))
+            throw std::runtime_error("failed to publish SONIC start command");
+        if(action.publish_pose) {
+            if(action.held) latest.joint_vel.fill(0.0);
+            if(!sonic.publish(latest,static_cast<std::int64_t>(++frame)))
+                throw std::runtime_error("failed to publish SONIC Protocol v1 frame");
+            ++tx_count;
+        }
+        if(action.send_stop && !sonic.publish_command(false,true))
+            throw std::runtime_error("failed to publish SONIC stop command");
+        next_tx+=SonicV1StreamState::tx_period;
+        if(now>next_tx+SonicV1StreamState::tx_period) next_tx=now+SonicV1StreamState::tx_period;
+        std::this_thread::sleep_until(next_tx);
     }
-    if(published<static_cast<std::uint64_t>(seconds*25))
-        throw std::runtime_error("insufficient GMR frames");
-    if(!sonic.publish_command(false,true))
+    if(stream.streaming() && !sonic.publish_command(false,true))
         throw std::runtime_error("failed to publish SONIC stop command");
-    std::cout << "gmr_sonic_frames=" << published << " stopped=yes\n";
+    if(ref_count<static_cast<std::uint64_t>(seconds*15) || tx_count<static_cast<std::uint64_t>(seconds*45))
+        throw std::runtime_error("insufficient GMR frames");
+    std::cout << "gmr_ref_frames=" << ref_count << " pose_tx_frames=" << tx_count
+              << " gmr_ref_fps=" << ref_count/static_cast<double>(seconds)
+              << " pose_tx_fps=" << tx_count/static_cast<double>(seconds) << " stopped=yes\n";
 }

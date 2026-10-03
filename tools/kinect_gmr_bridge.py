@@ -81,6 +81,7 @@ class Joint:
 class AdapterResult:
     human_frame: dict[str, tuple[np.ndarray, np.ndarray]] | None
     valid: int
+    low: int
     held: int
     stale: int
     calibrated: bool
@@ -89,7 +90,7 @@ class AdapterResult:
 class KinectToGMRAdapter:
     """Convert K4ABT joints to GMR's global metre + wxyz representation."""
 
-    def __init__(self, calibration_frames: int = 15, hold_seconds: float = 0.15):
+    def __init__(self, calibration_frames: int = 15, hold_seconds: float = 0.25):
         self.calibration_frames = max(1, calibration_frames)
         self.hold_us = int(hold_seconds * 1_000_000)
         self.cache: dict[str, tuple[Joint, int]] = {}
@@ -149,12 +150,14 @@ class KinectToGMRAdapter:
         states: dict[str, str] = {}
         for name in JOINT_NAMES:
             incoming = joints[name]
-            if incoming.confidence >= 1 and self._finite(incoming):
+            if incoming.confidence >= 2 and self._finite(incoming):
                 world = self._world_joint(incoming)
                 self.cache[name] = (world, timestamp_us)
                 selected[name], states[name] = world, "fresh"
-            elif name in self.cache and timestamp_us - self.cache[name][1] <= self.hold_us:
-                selected[name], states[name] = self.cache[name][0], "held"
+            elif name in self.cache:
+                cached, cached_at = self.cache[name]
+                selected[name] = cached
+                states[name] = "held" if timestamp_us - cached_at <= self.hold_us else "stale"
             elif name in self.neutral:
                 selected[name], states[name] = self.neutral[name], "stale"
             else:
@@ -165,16 +168,18 @@ class KinectToGMRAdapter:
                 self.calibration_samples.append({name: selected[name] for name in JOINT_NAMES})
                 if len(self.calibration_samples) >= self.calibration_frames:
                     self._finish_calibration()
-            return AdapterResult(None, 0, 0, len(GMR_TARGETS), self.world_basis is not None)
+            low = sum(joints[source].confidence == 1 for source in GMR_TARGETS.values())
+            return AdapterResult(None, 0, low, 0, len(GMR_TARGETS), self.world_basis is not None)
 
         human_frame: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        valid = held = stale = 0
+        valid = low = held = stale = 0
         basis = self.world_basis
         for target, source in GMR_TARGETS.items():
             state = states[source]
             if state == "fresh": valid += 1
             elif state == "held": held += 1
             else: stale += 1
+            low += joints[source].confidence == 1
             joint = selected.get(source, self.neutral[source])
             pos = basis.T @ (joint.position_mm - self.origin)
             current = Rotation.from_quat(joint.orientation_wxyz, scalar_first=True).as_matrix()
@@ -182,7 +187,7 @@ class KinectToGMRAdapter:
             delta = basis.T @ current @ neutral.T @ basis
             quat = Rotation.from_matrix(delta).as_quat(scalar_first=True)
             human_frame[target] = (pos, quat)
-        return AdapterResult(human_frame, valid, held, stale, True)
+        return AdapterResult(human_frame, valid, low, held, stale, True)
 
 
 class GMRPipeline:
@@ -208,6 +213,17 @@ class GMRPipeline:
         self.smoothing = float(np.clip(smoothing, 0.0, 1.0))
         self.previous_qpos: np.ndarray | None = None
         self.previous_timestamp = 0
+        self.last_good_full_qpos: np.ndarray | None = None
+        self.last_good_filtered_qpos: np.ndarray | None = None
+        self.last_good_timestamp = 0
+        self.last_timestamp = 0
+        self.hard_recovery_attempted = False
+        self.solve_ok = False
+        self.solve_failures = 0
+        self.consecutive_failures = 0
+        self.recoveries = 0
+        self.fallback_frames = 0
+        self.fallback_window_us = 300_000
         self.qpos_addresses: list[int] = []
         self.lower = self.upper = None
         self.reference_quats: dict[str, np.ndarray] = {}
@@ -250,7 +266,7 @@ class GMRPipeline:
                   f"first_live_qpos={qpos[index]:.6f} delta={qpos[index] - neutral_qpos:+.6f}", flush=True)
         print("gmr_neutral_dump end", flush=True)
 
-    def _start_gmr(self) -> None:
+    def _start_gmr(self, initial_qpos: np.ndarray | None = None) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             self.retargeter = self.GMR(
                 src_human=self.gmr_source, tgt_robot="unitree_g1",
@@ -274,9 +290,12 @@ class GMRPipeline:
         self.lower, self.upper = limits[:, 0], limits[:, 1]
 
         qpos = model.qpos0.copy()
-        qpos[:7] = (0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0)
-        for index, (address, value) in enumerate(zip(self.qpos_addresses, SONIC_NEUTRAL)):
-            qpos[address] = np.clip(value, self.lower[index], self.upper[index])
+        if initial_qpos is not None and initial_qpos.shape == (model.nq,) and np.isfinite(initial_qpos).all():
+            qpos = initial_qpos.copy()
+        else:
+            qpos[:7] = (0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0)
+            for index, (address, value) in enumerate(zip(self.qpos_addresses, SONIC_NEUTRAL)):
+                qpos[address] = np.clip(value, self.lower[index], self.upper[index])
         self.retargeter.configuration.update(qpos)
 
         data = self.retargeter.configuration.data
@@ -295,6 +314,7 @@ class GMRPipeline:
             ).as_quat(scalar_first=True)
 
     def update(self, joints: dict[str, Joint], timestamp_us: int):
+        self.last_timestamp = timestamp_us
         adapted = self.adapter.update(joints, timestamp_us)
         if adapted.human_frame is None:
             return None, adapted, 0.0
@@ -309,11 +329,25 @@ class GMRPipeline:
             adapted.human_frame[body_name] = (position, (orientation * reference).as_quat(scalar_first=True))
 
         started = time.perf_counter()
-        solved = self.retargeter.retarget(adapted.human_frame, offset_to_ground=False)
-        solve_ms = (time.perf_counter() - started) * 1000.0
-        raw = np.asarray([solved[address] for address in self.qpos_addresses])
-        if not np.isfinite(raw).all():
-            return None, adapted, solve_ms
+        try:
+            solved = self.retargeter.retarget(adapted.human_frame, offset_to_ground=False)
+            full_qpos = np.asarray(solved, dtype=float).copy()
+            solve_ms = (time.perf_counter() - started) * 1000.0
+            if full_qpos.shape != (self.retargeter.model.nq,):
+                raise ValueError("invalid_configuration_shape")
+            if not np.isfinite(full_qpos).all():
+                raise FloatingPointError("nonfinite_raw")
+            quaternion_norm = float(np.linalg.norm(full_qpos[3:7])) if full_qpos.size >= 7 else 0.0
+            if not 0.5 <= quaternion_norm <= 1.5:
+                raise ValueError("invalid_root_quaternion")
+            raw = np.asarray([full_qpos[address] for address in self.qpos_addresses])
+            if not np.isfinite(raw).all():
+                raise FloatingPointError("nonfinite_raw")
+        except Exception as error:
+            solve_ms = (time.perf_counter() - started) * 1000.0
+            reason = "nonfinite_raw" if isinstance(error, FloatingPointError) else "solver_exception"
+            self._recover_failed_solve(timestamp_us, reason)
+            return self._failure_output(timestamp_us), adapted, solve_ms
         raw = np.clip(raw, self.lower, self.upper)
 
         if self.previous_qpos is None:
@@ -328,7 +362,59 @@ class GMRPipeline:
 
         self.previous_qpos = filtered
         self.previous_timestamp = timestamp_us
+        self.last_good_full_qpos = full_qpos
+        self.last_good_filtered_qpos = filtered.copy()
+        self.last_good_timestamp = timestamp_us
+        self.hard_recovery_attempted = False
+        self.consecutive_failures = 0
+        self.solve_ok = True
         return (filtered, velocity), adapted, solve_ms
+
+    def _recover_failed_solve(self, timestamp_us: int, reason: str) -> None:
+        first_failure = self.consecutive_failures == 0
+        self.solve_ok = False
+        self.solve_failures += 1
+        self.consecutive_failures += 1
+        if first_failure:
+            print(f"gmr_recovery reason={reason}", file=sys.stderr, flush=True)
+
+        rollback = self.last_good_full_qpos
+        if rollback is None and self.retargeter is not None:
+            rollback = np.asarray(self.retargeter.model.qpos0, dtype=float).copy()
+            rollback[:7] = (0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0)
+            for index, address in enumerate(self.qpos_addresses):
+                rollback[address] = np.clip(SONIC_NEUTRAL[index], self.lower[index], self.upper[index])
+        if rollback is not None:
+            try:
+                self.retargeter.configuration.update(rollback.copy())
+                self.recoveries += 1
+            except Exception:
+                pass
+
+        age_us = timestamp_us - self.last_good_timestamp if self.last_good_timestamp else self.fallback_window_us + 1
+        if age_us > self.fallback_window_us and not self.hard_recovery_attempted:
+            self.hard_recovery_attempted = True
+            try:
+                self._start_gmr(self.last_good_full_qpos)
+                self.recoveries += 1
+            except Exception as error:
+                print(f"gmr_recovery reason=reinitialize_failed error={error}", file=sys.stderr, flush=True)
+
+    def _failure_output(self, timestamp_us: int):
+        age_us = timestamp_us - self.last_good_timestamp if self.last_good_timestamp else self.fallback_window_us + 1
+        if self.last_good_filtered_qpos is None or age_us > self.fallback_window_us:
+            return None
+        self.previous_qpos = self.last_good_filtered_qpos.copy()
+        self.previous_timestamp = timestamp_us
+        self.fallback_frames += 1
+        return self.last_good_filtered_qpos.copy(), np.zeros(29)
+
+    def diagnostic_line(self) -> str:
+        age_ms = ((self.last_timestamp - self.last_good_timestamp) / 1000.0
+                  if self.last_good_timestamp else -1.0)
+        return (f"gmr_solve_ok={int(self.solve_ok)} gmr_solve_failures={self.solve_failures} "
+                f"gmr_consecutive_failures={self.consecutive_failures} gmr_recoveries={self.recoveries} "
+                f"gmr_fallback_frames={self.fallback_frames} last_good_age_ms={age_ms:.1f}")
 
 
 def decode_request(message: bytes):
@@ -352,7 +438,8 @@ def response(status: int, timestamp_us: int, adapted: AdapterResult | None = Non
     valid = adapted.valid if adapted else 0
     held = adapted.held if adapted else 0
     stale = adapted.stale if adapted else len(GMR_TARGETS)
-    header = RESPONSE_HEADER.pack(b"GMR1", 1, status, 0, timestamp_us, valid, held, stale, solve_ms)
+    low = adapted.low if adapted else 0
+    header = RESPONSE_HEADER.pack(b"GMR1", 1, status, low, timestamp_us, valid, held, stale, solve_ms)
     if values is None:
         values = (np.zeros(29), np.zeros(29))
     return header + RESPONSE_VALUES.pack(*values[0], *values[1])
@@ -386,6 +473,7 @@ def main() -> int:
     print("upper_limb_orientation=position_dominant", flush=True)
     print("wrist_orientation=neutral_low_weight", flush=True)
     last_verbose = 0.0
+    last_diagnostics = time.monotonic()
     neutral_dumped = False
     try:
         while True:
@@ -403,6 +491,9 @@ def main() -> int:
                         print(f"target={body_name} human_pos={human_pos.tolist()} human_wxyz={human_quat.tolist()} "
                               f"gmr_pos={gmr_pos.tolist()} gmr_wxyz={gmr_quat.tolist()}")
                     last_verbose = time.monotonic()
+                if time.monotonic() - last_diagnostics >= 1.0:
+                    print(pipeline.diagnostic_line(), flush=True)
+                    last_diagnostics = time.monotonic()
             except Exception as error:
                 print(f"gmr_error={error}", file=sys.stderr, flush=True)
                 socket.send(response(0, 0))

@@ -8,6 +8,7 @@
 
 struct GMRAdapterStats {
     std::size_t valid_targets = 0;
+    std::size_t low_targets = 0;
     std::size_t held_targets = 0;
     std::size_t stale_targets = 0;
     double solve_ms = 0.0;

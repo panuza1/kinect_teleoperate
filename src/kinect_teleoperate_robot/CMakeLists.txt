@@ -93,6 +93,10 @@ if (BUILD_TESTING)
     target_compile_options(kinect_g1_mujoco_test PRIVATE -UNDEBUG)
     add_test(NAME kinect_g1_mujoco_test COMMAND kinect_g1_mujoco_test)
 
+    add_executable(kinect_sonic_v1_stream_test sonic_v1_stream_test.cpp)
+    target_compile_options(kinect_sonic_v1_stream_test PRIVATE -UNDEBUG)
+    add_test(NAME kinect_sonic_v1_stream_test COMMAND kinect_sonic_v1_stream_test)
+
     if (EXISTS "${SONIC_INCLUDE}/input_interface/zmq_packed_message_subscriber.hpp" AND EXISTS "${SONIC_JSON_INCLUDE}/nlohmann/json.hpp")
         add_executable(kinect_sonic_v1_protocol_test sonic_v1_protocol_test.cpp)
         target_include_directories(kinect_sonic_v1_protocol_test PRIVATE ${SONIC_INCLUDE} ${SONIC_JSON_INCLUDE} ${ZMQ_INCLUDE_DIR})

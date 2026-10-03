@@ -26,7 +26,7 @@ struct ResponseHeader {
     char magic[4];
     std::uint16_t version;
     std::uint8_t status;
-    std::uint8_t reserved;
+    std::uint8_t low;
     std::uint64_t timestamp_us;
     std::uint16_t valid;
     std::uint16_t held;
@@ -96,6 +96,7 @@ std::optional<G1Reference> KinectToGMRAdapter::update(const KinectSkeletonSample
     stats_.connected = true;
     stats_.calibrated = response.header.status >= 1;
     stats_.valid_targets = response.header.valid;
+    stats_.low_targets = response.header.low;
     stats_.held_targets = response.header.held;
     stats_.stale_targets = response.header.stale;
     stats_.solve_ms = response.header.solve_ms;

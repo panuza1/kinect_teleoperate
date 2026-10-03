@@ -76,6 +76,14 @@ R_source_current = Delta R R_source_neutral
 This preserves full quaternion coupling and removes K4ABT's joint-frame bias
 without unexplained Euler swaps.
 
+The Kinect-only GMR profile holds pelvis orientation strongly in both IK passes
+(orientation cost 100) so a unilateral leg position shift is not absorbed as
+opposite-leg hip-roll motion through the free-root solution. A fixed-base
+MuJoCo regression replays left/right 25-degree position-only abductions; an
+additional orientation-aware check protects the full Kinect target path. Each
+moving hip roll must respond at least 0.15 rad while the opposite roll stays
+within 25% of that response.
+
 For `Left_Hand` and `Right_Hand`, the Kinect profile replaces the raw wrist
 delta with the calibrated neutral source orientation before GMR. Their
 orientation is held to a low-weight neutral target, so raw K4ABT wrist
@@ -127,7 +135,7 @@ right shoulder pitch, roll, yaw; right elbow; right wrist roll, pitch, yaw
 ```
 
 GMR's model limits are a conservative subset of the SONIC model limits for
-this order. Output is clamped to GMR's named limits. A 0.45 exponential filter
+this order. Output is clamped to GMR's named limits. A 0.20 exponential filter
 is applied, changes above 1.2 rad/frame are rejected, and qvel is the wrapped
 filtered delta divided by the K4ABT timestamp interval, bounded to 12 rad/s.
 Invalid values and timestamp intervals outside 1–250 ms never produce an
